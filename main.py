@@ -6,13 +6,6 @@ import requests
 # The live URL to scrape
 CLICFLYER_HOME_URL = "https://www.clicflyer.com/shoppers/en/saudi-arabia/riyadh/home"
 
-# Local fallback cache files
-FALLBACK_FILES = [
-    "htmls/clicflyer_home_live.html",
-    "htmls/Lulu Hypermarkets Flyers in Riyadh.html",
-    "htmls/Lulu Deals in Riyadh _ Latest Offers in KSA.html"
-]
-
 def fetch_live_html(url):
     """Attempts to fetch the HTML content directly from the internet."""
     headers = {
@@ -28,6 +21,7 @@ def fetch_live_html(url):
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
             print("Successfully fetched live HTML from the internet!")
+
             return response.text
         else:
             print(f"Warning: Live fetch failed with HTTP status code {response.status_code}.")
@@ -38,44 +32,34 @@ def fetch_live_html(url):
         
     return None
 
+from bs4 import BeautifulSoup
+
 def extract_retailers_from_html_content(html):
-    """Parses HTML content to extract all retailer names and hyperlinks."""
     retailers = {}
-    if not html:
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    menu = soup.find("ul", id="menuRetHeader")
+    if not menu:
         return retailers
-        
-    # Find the menu container <ul id="menuRetHeader" ...> ... </ul>
-    menu_matches = re.findall(r'<ul[^>]*id="menuRetHeader"[^>]*>(.*?)</ul>', html, re.DOTALL | re.IGNORECASE)
-    for menu_html in menu_matches:
-        # Find all <a href="..."> <span>Name</span> </a> inside it
-        a_matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>\s*<span>(.*?)</span>\s*</a>', menu_html, re.DOTALL | re.IGNORECASE)
-        for href, name in a_matches:
-            name_clean = name.strip()
-            href_clean = href.strip()
-            # Ignore empty/dummy links
-            if href_clean and name_clean and not href_clean.startswith("javascript:"):
-                # Make relative URLs absolute if needed
-                if href_clean.startswith("/"):
-                    href_clean = "https://www.clicflyer.com" + href_clean
-                
-                # Check for duplicates and prioritize ASCII (English-slugged) URLs
-                if name_clean in retailers:
-                    existing_href = retailers[name_clean]
-                    if href_clean.isascii() and not existing_href.isascii():
-                        retailers[name_clean] = href_clean
-                else:
-                    retailers[name_clean] = href_clean
-                
+
+    for a in menu.find_all("a", href=True):
+        href = a["href"]
+
+        span = a.find("span")
+        if not span:
+            continue
+
+        name = span.get_text(strip=True)
+
+        if href.startswith("/"):
+            href = "https://www.clicflyer.com" + href
+
+        if name not in retailers:
+            retailers[name] = href
+
     return retailers
 
-def load_fallback_html():
-    """Loads HTML from the local fallback cache files."""
-    for filepath in FALLBACK_FILES:
-        if os.path.exists(filepath):
-            print(f"Loading local fallback HTML file: {filepath}...")
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-    return None
 
 def categorize_retailer(name):
     """Categorizes a retailer based on name keywords."""
@@ -86,26 +70,9 @@ def categorize_retailer(name):
         "cash and carry", "fresh", "wafa", "al jazera", "othaim", "tamimi", 
         "manuel", "wissam", "centro", "ramez", "city flower", "day n day", 
         "ala kaifak", "a market", "prime", "coop"
-    ]
-    pharmacy_keywords = [
-        "pharmacy", "pharmacies", "nahdi", "balsam", "innova", "ghaya", 
-        "adam", "orange", "whites", "united", "ibrand"
-    ]
-    electronics_keywords = [
-        "extra", "sony", "almanea", "sheta", "tamkeen", "ddpai"
-    ]
-    automotive_keywords = [
-        "motors", "toyota", "mitsubishi", "peugeot", "nissan", "petromin", "kia", "aljabr"
-    ]
-    
+    ]    
     if any(kw in name_lower for kw in supermarket_keywords):
         return "Supermarkets"
-    elif any(kw in name_lower for kw in pharmacy_keywords):
-        return "Pharmacies"
-    elif any(kw in name_lower for kw in electronics_keywords):
-        return "Electronics"
-    elif any(kw in name_lower for kw in automotive_keywords):
-        return "Automotive"
     else:
         return "Others"
 
@@ -116,7 +83,6 @@ def main():
     # 2. Fall back to local reference HTML if live fetch failed
     if not html_content:
         print("Falling back to local reference HTML files to parse the elements...")
-        html_content = load_fallback_html()
         
     if not html_content:
         print("Error: Could not retrieve HTML content from live internet or local fallback files.")
@@ -133,9 +99,6 @@ def main():
     # 4. Categorize and organize
     categorized = {
         "Supermarkets": {},
-        "Pharmacies": {},
-        "Electronics": {},
-        "Automotive": {},
         "Others": {}
     }
     
@@ -149,9 +112,6 @@ def main():
         json.dump(supermarkets_data, f, indent=4, ensure_ascii=False)
     print("Saved supermarkets list to 'supermarkets.json'.")
 
-    with open("all_retailers.json", "w", encoding="utf-8") as f:
-        json.dump(categorized, f, indent=4, ensure_ascii=False)
-    print("Saved all categorized retailers to 'all_retailers.json'.")
 
     # 6. Print results summary
     print("\n==================================================")
