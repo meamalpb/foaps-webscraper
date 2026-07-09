@@ -1,6 +1,161 @@
-def main():
-    print("Hello from v1!")
+import os
+import re
+import json
+import requests
 
+# The live URL to scrape
+CLICFLYER_HOME_URL = "https://www.clicflyer.com/shoppers/en/saudi-arabia/riyadh/home"
+
+# Local fallback cache files
+FALLBACK_FILES = [
+    "htmls/clicflyer_home_live.html",
+    "htmls/Lulu Hypermarkets Flyers in Riyadh.html",
+    "htmls/Lulu Deals in Riyadh _ Latest Offers in KSA.html"
+]
+
+def fetch_live_html(url):
+    """Attempts to fetch the HTML content directly from the internet."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "max-age=0",
+        "Upgrade-Insecure-Requests": "1"
+    }
+    
+    print(f"Attempting to fetch live HTML from {url}...")
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            print("Successfully fetched live HTML from the internet!")
+            return response.text
+        else:
+            print(f"Warning: Live fetch failed with HTTP status code {response.status_code}.")
+            if response.status_code == 503:
+                print("Note: HTTP 503 is typical when running from datacenter IP addresses (like cloud agent environments) due to automated bot blocks.")
+    except Exception as e:
+        print(f"Warning: Failed to connect to the live website. Error: {e}")
+        
+    return None
+
+def extract_retailers_from_html_content(html):
+    """Parses HTML content to extract all retailer names and hyperlinks."""
+    retailers = {}
+    if not html:
+        return retailers
+        
+    # Find the menu container <ul id="menuRetHeader" ...> ... </ul>
+    menu_matches = re.findall(r'<ul[^>]*id="menuRetHeader"[^>]*>(.*?)</ul>', html, re.DOTALL | re.IGNORECASE)
+    for menu_html in menu_matches:
+        # Find all <a href="..."> <span>Name</span> </a> inside it
+        a_matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>\s*<span>(.*?)</span>\s*</a>', menu_html, re.DOTALL | re.IGNORECASE)
+        for href, name in a_matches:
+            name_clean = name.strip()
+            href_clean = href.strip()
+            # Ignore empty/dummy links
+            if href_clean and name_clean and not href_clean.startswith("javascript:"):
+                # Make relative URLs absolute if needed
+                if href_clean.startswith("/"):
+                    href_clean = "https://www.clicflyer.com" + href_clean
+                retailers[name_clean] = href_clean
+                
+    return retailers
+
+def load_fallback_html():
+    """Loads HTML from the local fallback cache files."""
+    for filepath in FALLBACK_FILES:
+        if os.path.exists(filepath):
+            print(f"Loading local fallback HTML file: {filepath}...")
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+    return None
+
+def categorize_retailer(name):
+    """Categorizes a retailer based on name keywords."""
+    name_lower = name.lower()
+    
+    supermarket_keywords = [
+        "market", "hyper", "panda", "danube", "lulu", "nesto", "farm", 
+        "cash and carry", "fresh", "wafa", "al jazera", "othaim", "tamimi", 
+        "manuel", "wissam", "centro", "ramez", "city flower", "day n day", 
+        "ala kaifak", "a market", "prime", "coop"
+    ]
+    pharmacy_keywords = [
+        "pharmacy", "pharmacies", "nahdi", "balsam", "innova", "ghaya", 
+        "adam", "orange", "whites", "united", "ibrand"
+    ]
+    electronics_keywords = [
+        "extra", "sony", "almanea", "sheta", "tamkeen", "ddpai"
+    ]
+    automotive_keywords = [
+        "motors", "toyota", "mitsubishi", "peugeot", "nissan", "petromin", "kia", "aljabr"
+    ]
+    
+    if any(kw in name_lower for kw in supermarket_keywords):
+        return "Supermarkets"
+    elif any(kw in name_lower for kw in pharmacy_keywords):
+        return "Pharmacies"
+    elif any(kw in name_lower for kw in electronics_keywords):
+        return "Electronics"
+    elif any(kw in name_lower for kw in automotive_keywords):
+        return "Automotive"
+    else:
+        return "Others"
+
+def main():
+    # 1. Attempt to fetch HTML from the live internet
+    html_content = fetch_live_html(CLICFLYER_HOME_URL)
+    
+    # 2. Fall back to local reference HTML if live fetch failed
+    if not html_content:
+        print("Falling back to local reference HTML files to parse the elements...")
+        html_content = load_fallback_html()
+        
+    if not html_content:
+        print("Error: Could not retrieve HTML content from live internet or local fallback files.")
+        return
+
+    # 3. Extract retailers
+    all_retailers = extract_retailers_from_html_content(html_content)
+    print(f"\nTotal unique retailers extracted: {len(all_retailers)}")
+    
+    if not all_retailers:
+        print("Warning: No retailers found. This could indicate a change in the page's HTML structure.")
+        return
+
+    # 4. Categorize and organize
+    categorized = {
+        "Supermarkets": {},
+        "Pharmacies": {},
+        "Electronics": {},
+        "Automotive": {},
+        "Others": {}
+    }
+    
+    for name, href in all_retailers.items():
+        category = categorize_retailer(name)
+        categorized[category][name] = href
+
+    # 5. Save output files
+    supermarkets_data = categorized["Supermarkets"]
+    with open("supermarkets.json", "w", encoding="utf-8") as f:
+        json.dump(supermarkets_data, f, indent=4, ensure_ascii=False)
+    print("Saved supermarkets list to 'supermarkets.json'.")
+
+    with open("all_retailers.json", "w", encoding="utf-8") as f:
+        json.dump(categorized, f, indent=4, ensure_ascii=False)
+    print("Saved all categorized retailers to 'all_retailers.json'.")
+
+    # 6. Print results summary
+    print("\n==================================================")
+    print("             SUPERMARKETS / HYPERMARKETS          ")
+    print("==================================================")
+    print(f"Found {len(supermarkets_data)} supermarkets:")
+    print(f"| {'Supermarket Name':<45} | {'Hyperlink':<70} |")
+    print(f"|{'-'*47}|{'-'*72}|")
+    for name, href in sorted(supermarkets_data.items()):
+        print(f"| {name:<45} | {href:<70} |")
+    print("==================================================")
 
 if __name__ == "__main__":
     main()
