@@ -1,0 +1,248 @@
+"""
+fetch_first_flyers.py
+
+Standalone script (separate from main.py) that:
+  1. Reads supermarkets.json
+  2. Takes ONLY the first retailer entry in it
+  3. Fetches that retailer's page live using Playwright (JS-rendered)
+  4. Extracts flyer links from it
+  5. Saves the raw HTML too, so if extraction finds 0 results we can
+     actually see what the live page looked like and fix the regex.
+
+Run:
+    python3 fetch_first_flyers.py
+"""
+
+import os
+import re
+import json
+import time
+from playwright.sync_api import sync_playwright
+
+SUPERMARKETS_JSON = "supermarkets.json"
+OUTPUT_JSON = "flyers_first.json"
+DEBUG_HTML_FILE = "htmls/debug_first_retailer_live.html"
+
+# Playwright will handle its own modern User-Agent strings natively, 
+# but we maintain a record for custom network setups if ever needed.
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "max-age=0",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def get_first_retailer():
+    """Reads supermarkets.json and returns (name, url) of the first entry only."""
+    if not os.path.exists(SUPERMARKETS_JSON):
+        raise FileNotFoundError(
+            f"'{SUPERMARKETS_JSON}' not found. Run main.py first to generate it."
+        )
+
+    with open(SUPERMARKETS_JSON, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not data:
+        raise ValueError(f"'{SUPERMARKETS_JSON}' is empty.")
+
+    first_name = next(iter(data))
+    first_url = data[first_name]
+    return first_name, first_url
+
+
+def fetch_live_html(url):
+    """Fetches a single URL live using Playwright. Returns (html_text, status_code) or (None, status_code/None)."""
+    print(f"Fetching live HTML via Playwright from: {url}")
+    try:
+        with sync_playwright() as p:
+            # Launch Chromium in headless mode
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(extra_http_headers=HEADERS)
+            page = context.new_page()
+            
+            # Visit the retailer URL and wait for network activity to settle down
+            response = page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            # FIX: Playwright uses .status instead of .status_code
+            status_code = response.status if response else None
+            
+            # Explicitly wait an additional 3-5 seconds (using 4 seconds as a safe median)
+            time.sleep(4)
+            
+            # Capture the fully rendered DOM content
+            html_text = page.content()
+            
+            print(f"  HTTP status: {status_code}, content length: {len(html_text)} chars")
+            
+            browser.close()
+            
+            if status_code == 200:
+                return html_text, status_code
+            else:
+                print(f"  Warning: non-200 status code ({status_code}).")
+                return html_text, status_code
+                
+    except Exception as e:
+        print(f"  Error fetching page with Playwright: {e}")
+        return None, None
+
+
+def save_debug_html(html):
+    """Writes the raw fetched HTML to disk so we can inspect it manually if extraction fails."""
+    os.makedirs(os.path.dirname(DEBUG_HTML_FILE), exist_ok=True)
+    with open(DEBUG_HTML_FILE, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  Saved raw fetched HTML to '{DEBUG_HTML_FILE}' for inspection.")
+
+
+def extract_flyers_strict(html):
+    """
+    Original strict rule: <a> tag must have BOTH
+        title="Click here to view offers"
+    and
+        class="product-image"
+    (attribute order independent, exact substring match).
+    """
+    flyers = []
+    seen = set()
+    a_tags = re.findall(r"<a\b[^>]*>", html, re.IGNORECASE)
+
+    for tag in a_tags:
+        if "Click here to view offers" not in tag:
+            continue
+        if 'class="product-image"' not in tag:
+            continue
+
+        href_match = re.search(r'href\s*=\s*"([^"]+)"', tag)
+        if not href_match:
+            continue
+        href = href_match.group(1).strip()
+        if href in seen or not href or href.startswith("javascript:"):
+            continue
+        seen.add(href)
+
+        id_match = re.search(r'\bid\s*=\s*"([^"]+)"', tag)
+        flyers.append({
+            "id": id_match.group(1).strip() if id_match else None,
+            "url": href,
+        })
+
+    return flyers
+
+
+def extract_flyers_loose(html):
+    """
+    Looser fallback rule: ANY <a> tag whose href contains '/flyers/'.
+    This doesn't require the exact title/class match, in case the live
+    site's markup differs slightly from the cached snapshot (different
+    quoting, extra classes, missing title attribute, etc).
+    """
+    flyers = []
+    seen = set()
+    a_tags = re.findall(r"<a\b[^>]*>", html, re.IGNORECASE)
+
+    for tag in a_tags:
+        href_match = re.search(r'href\s*=\s*["\']([^"\']*/flyers/[^"\']+)["\']', tag)
+        if not href_match:
+            continue
+        href = href_match.group(1).strip()
+        if href in seen:
+            continue
+        seen.add(href)
+
+        id_match = re.search(r'\bid\s*=\s*["\']([^"\']+)["\']', tag)
+        flyers.append({
+            "id": id_match.group(1).strip() if id_match else None,
+            "url": href,
+        })
+
+    return flyers
+
+
+def extract_flyers_anywhere(html):
+    """
+    Most permissive fallback: scan the ENTIRE HTML text (not just <a> tags)
+    for anything that looks like a flyer URL, e.g. in case links are inside
+    a JSON blob embedded in a <script> tag instead of plain <a href="...">.
+    """
+    matches = re.findall(r'https?://[^\s"\'<>]+/flyers/[^\s"\'<>]+', html)
+    unique = sorted(set(matches))
+    return [{"id": None, "url": u} for u in unique]
+
+
+def run_diagnostics(html):
+    """Prints some quick stats to help explain a 0-result extraction."""
+    total_a_tags = len(re.findall(r"<a\b[^>]*>", html, re.IGNORECASE))
+    tags_with_flyers_href = len(re.findall(r'href\s*=\s*["\'][^"\']*/flyers/[^"\']+["\']', html))
+    tags_with_click_title = html.count("Click here to view offers")
+    tags_with_product_image_class = html.count('class="product-image"')
+
+    print("\n--- Diagnostics on fetched HTML ---")
+    print(f"  Total <a> tags found:                         {total_a_tags}")
+    print(f"  <a> hrefs containing '/flyers/':               {tags_with_flyers_href}")
+    print(f"  Occurrences of 'Click here to view offers':    {tags_with_click_title}")
+    print(f"  Occurrences of class=\"product-image\":          {tags_with_product_image_class}")
+    print("------------------------------------\n")
+
+
+def main():
+    name, url = get_first_retailer()
+    print(f"First retailer in {SUPERMARKETS_JSON}: {name}")
+    print(f"URL: {url}\n")
+
+    html, status_code = fetch_live_html(url)
+
+    if not html:
+        print(f"\nCould not fetch live HTML (status: {status_code}). Nothing to extract.")
+        return
+
+    save_debug_html(html)
+    run_diagnostics(html)
+
+    strict_flyers = extract_flyers_strict(html)
+    print(f"Strict match (title + class): {len(strict_flyers)} flyer(s) found.")
+
+    loose_flyers = extract_flyers_loose(html)
+    print(f"Loose match (href contains '/flyers/'):        {len(loose_flyers)} flyer(s) found.")
+
+    anywhere_flyers = extract_flyers_anywhere(html)
+    print(f"Anywhere-in-HTML match ('/flyers/' substring): {len(anywhere_flyers)} flyer(s) found.")
+
+    # Use whichever method actually found something, preferring the more
+    # precise ones first.
+    if strict_flyers:
+        final_flyers, method = strict_flyers, "strict"
+    elif loose_flyers:
+        final_flyers, method = loose_flyers, "loose"
+    elif anywhere_flyers:
+        final_flyers, method = anywhere_flyers, "anywhere"
+    else:
+        final_flyers, method = [], "none"
+
+    result = {
+        name: {
+            "retailer_url": url,
+            "extraction_method": method,
+            "flyers": final_flyers,
+        }
+    }
+
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=4, ensure_ascii=False)
+
+    print(f"\nUsed '{method}' extraction method.")
+    print(f"Saved {len(final_flyers)} flyer(s) to '{OUTPUT_JSON}'.")
+
+    if not final_flyers:
+        print(
+            f"\nNo flyers found by any method. Open '{DEBUG_HTML_FILE}' and search for "
+            "'flyers/' or 'product-image' manually to see how the live page's markup "
+            "actually looks — it likely differs from the cached snapshot this scraper "
+            "was originally built against (or the site served a bot-check page)."
+        )
+
+
+if __name__ == "__main__":
+    main()
