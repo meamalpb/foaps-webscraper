@@ -57,7 +57,14 @@ def extract_retailers_from_html_content(html):
                 # Make relative URLs absolute if needed
                 if href_clean.startswith("/"):
                     href_clean = "https://www.clicflyer.com" + href_clean
-                retailers[name_clean] = href_clean
+                
+                # Check for duplicates and prioritize ASCII (English-slugged) URLs
+                if name_clean in retailers:
+                    existing_href = retailers[name_clean]
+                    if href_clean.isascii() and not existing_href.isascii():
+                        retailers[name_clean] = href_clean
+                else:
+                    retailers[name_clean] = href_clean
                 
     return retailers
 
