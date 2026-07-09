@@ -63,7 +63,7 @@ def fetch_live_html(url):
             page = context.new_page()
             
             # Visit the retailer URL and wait for network activity to settle down
-            response = page.goto(url, wait_until="networkidle", timeout=30000)
+            response = page.goto(url, wait_until="load")
             
             # FIX: Playwright uses .status instead of .status_code
             status_code = response.status if response else None
@@ -74,7 +74,7 @@ def fetch_live_html(url):
             # Capture the fully rendered DOM content
             html_text = page.content()
             
-            print(f"  HTTP status: {status_code}, content length: {len(html_text)} chars")
+            print(f"\nHTTP status: {status_code}, content length: {len(html_text)} chars")
             
             browser.close()
             
@@ -94,82 +94,44 @@ def save_debug_html(html):
     os.makedirs(os.path.dirname(DEBUG_HTML_FILE), exist_ok=True)
     with open(DEBUG_HTML_FILE, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"  Saved raw fetched HTML to '{DEBUG_HTML_FILE}' for inspection.")
+    print(f"Saved raw fetched HTML to '{DEBUG_HTML_FILE}' for inspection.")
 
+
+from bs4 import BeautifulSoup
 
 def extract_flyers_strict(html):
     """
-    Original strict rule: <a> tag must have BOTH
-        title="Click here to view offers"
-    and
-        class="product-image"
-    (attribute order independent, exact substring match).
+    Extract flyer links using BeautifulSoup.
+    Only accepts <a> tags with:
+      - title="Click here to view offers"
+      - class="product-image"
     """
+
     flyers = []
     seen = set()
-    a_tags = re.findall(r"<a\b[^>]*>", html, re.IGNORECASE)
 
-    for tag in a_tags:
-        if "Click here to view offers" not in tag:
-            continue
-        if 'class="product-image"' not in tag:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for a in soup.find_all("a"):
+        if a.get("title") != "Click here to view offers":
             continue
 
-        href_match = re.search(r'href\s*=\s*"([^"]+)"', tag)
-        if not href_match:
+        classes = a.get("class", [])
+        if "product-image" not in classes:
             continue
-        href = href_match.group(1).strip()
-        if href in seen or not href or href.startswith("javascript:"):
+
+        href = a.get("href")
+        if not href or href.startswith("javascript:") or href in seen:
             continue
+
         seen.add(href)
 
-        id_match = re.search(r'\bid\s*=\s*"([^"]+)"', tag)
         flyers.append({
-            "id": id_match.group(1).strip() if id_match else None,
+            "id": a.get("id"),
             "url": href,
         })
 
     return flyers
-
-
-def extract_flyers_loose(html):
-    """
-    Looser fallback rule: ANY <a> tag whose href contains '/flyers/'.
-    This doesn't require the exact title/class match, in case the live
-    site's markup differs slightly from the cached snapshot (different
-    quoting, extra classes, missing title attribute, etc).
-    """
-    flyers = []
-    seen = set()
-    a_tags = re.findall(r"<a\b[^>]*>", html, re.IGNORECASE)
-
-    for tag in a_tags:
-        href_match = re.search(r'href\s*=\s*["\']([^"\']*/flyers/[^"\']+)["\']', tag)
-        if not href_match:
-            continue
-        href = href_match.group(1).strip()
-        if href in seen:
-            continue
-        seen.add(href)
-
-        id_match = re.search(r'\bid\s*=\s*["\']([^"\']+)["\']', tag)
-        flyers.append({
-            "id": id_match.group(1).strip() if id_match else None,
-            "url": href,
-        })
-
-    return flyers
-
-
-def extract_flyers_anywhere(html):
-    """
-    Most permissive fallback: scan the ENTIRE HTML text (not just <a> tags)
-    for anything that looks like a flyer URL, e.g. in case links are inside
-    a JSON blob embedded in a <script> tag instead of plain <a href="...">.
-    """
-    matches = re.findall(r'https?://[^\s"\'<>]+/flyers/[^\s"\'<>]+', html)
-    unique = sorted(set(matches))
-    return [{"id": None, "url": u} for u in unique]
 
 
 def run_diagnostics(html):
@@ -188,9 +150,9 @@ def run_diagnostics(html):
 
 
 def main():
+    start_time = time.perf_counter()
     name, url = get_first_retailer()
     print(f"First retailer in {SUPERMARKETS_JSON}: {name}")
-    print(f"URL: {url}\n")
 
     html, status_code = fetch_live_html(url)
 
@@ -199,25 +161,13 @@ def main():
         return
 
     save_debug_html(html)
-    run_diagnostics(html)
 
     strict_flyers = extract_flyers_strict(html)
-    print(f"Strict match (title + class): {len(strict_flyers)} flyer(s) found.")
-
-    loose_flyers = extract_flyers_loose(html)
-    print(f"Loose match (href contains '/flyers/'):        {len(loose_flyers)} flyer(s) found.")
-
-    anywhere_flyers = extract_flyers_anywhere(html)
-    print(f"Anywhere-in-HTML match ('/flyers/' substring): {len(anywhere_flyers)} flyer(s) found.")
 
     # Use whichever method actually found something, preferring the more
     # precise ones first.
     if strict_flyers:
         final_flyers, method = strict_flyers, "strict"
-    elif loose_flyers:
-        final_flyers, method = loose_flyers, "loose"
-    elif anywhere_flyers:
-        final_flyers, method = anywhere_flyers, "anywhere"
     else:
         final_flyers, method = [], "none"
 
@@ -232,17 +182,14 @@ def main():
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=4, ensure_ascii=False)
 
-    print(f"\nUsed '{method}' extraction method.")
-    print(f"Saved {len(final_flyers)} flyer(s) to '{OUTPUT_JSON}'.")
+    print(f"\nSaved {len(final_flyers)} flyer(s) to '{OUTPUT_JSON}'.")
 
     if not final_flyers:
         print(
-            f"\nNo flyers found by any method. Open '{DEBUG_HTML_FILE}' and search for "
-            "'flyers/' or 'product-image' manually to see how the live page's markup "
-            "actually looks — it likely differs from the cached snapshot this scraper "
-            "was originally built against (or the site served a bot-check page)."
+            f"\nNo flyers found by any method."
         )
-
+    end_time = time.perf_counter()
+    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()
