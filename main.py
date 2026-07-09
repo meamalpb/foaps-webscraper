@@ -5,6 +5,7 @@ import requests
 
 # The live URL to scrape
 CLICFLYER_HOME_URL = "https://www.clicflyer.com/shoppers/en/saudi-arabia/riyadh/home"
+OUTPUT_FILE = "results/supermarkets.json"
 
 def fetch_live_html(url):
     """Attempts to fetch the HTML content directly from the internet."""
@@ -76,8 +77,14 @@ def categorize_retailer(name):
     else:
         return "Others"
 
+def create_output_directories():
+    """Create output directories if they don't already exist."""
+    os.makedirs("results", exist_ok=True)
+    os.makedirs("htmls", exist_ok=True)
+
 def main():
     # 1. Attempt to fetch HTML from the live internet
+    create_output_directories()
     html_content = fetch_live_html(CLICFLYER_HOME_URL)
     
     # 2. Fall back to local reference HTML if live fetch failed
@@ -108,7 +115,7 @@ def main():
 
     # 5. Save output files
     supermarkets_data = categorized["Supermarkets"]
-    with open("supermarkets.json", "w", encoding="utf-8") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(supermarkets_data, f, indent=4, ensure_ascii=False)
     print("Saved supermarkets list to 'supermarkets.json'.")
 

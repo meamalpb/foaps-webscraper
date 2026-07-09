@@ -19,8 +19,8 @@ import json
 import time
 from playwright.sync_api import sync_playwright
 
-SUPERMARKETS_JSON = "supermarkets.json"
-OUTPUT_JSON = "flyers_first.json"
+SUPERMARKETS_JSON = "results/supermarkets.json"
+OUTPUT_JSON = "results/flyers_first.json"
 DEBUG_HTML_FILE = "htmls/debug_first_retailer_live.html"
 
 # Playwright will handle its own modern User-Agent strings natively, 
