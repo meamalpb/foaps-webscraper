@@ -4,7 +4,7 @@ import json
 import requests
 
 # The live URL to scrape
-CLICFLYER_HOME_URL = "https://www.clicflyer.com/shoppers/en/saudi-arabia/riyadh/home"
+CLICFLYER_HOME_URL = "https://clicflyer.com/shoppers/en/saudi-arabia/jeddah/home"
 OUTPUT_FILE = "results/supermarkets.json"
 
 def fetch_live_html(url):

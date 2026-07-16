@@ -1,6 +1,7 @@
 htmls/
 results/
 .DS_Store
+.env
 
 # Python-generated files
 __pycache__/
