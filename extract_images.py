@@ -119,12 +119,15 @@ def main():
     print(f"Found {len(images)} images")
 
     output = {
-        retailer_name: {
-            "flyer_url": flyer_url,
-            "image_count": len(images),
-            "images": images
-        }
-    }
+        "city": "Jeddah",
+        "retailers": {
+            retailer_name: [
+                {
+                    "flyer_url": flyer_url,
+                    "image_count": len(images),
+                    "images": images
+                }
+            ]}}
 
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
