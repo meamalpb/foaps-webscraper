@@ -1,8 +1,18 @@
 import json
+import os
+
+from dotenv import load_dotenv
+
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import time
+load_dotenv()
 
+
+ENV = os.getenv("ENV", "prod").lower()
+NUMBER_OF_RETAILERS = int(os.getenv("NUMBER_OF_RETAILERS", "999999"))
+NUMBER_OF_FLYERS = int(os.getenv("NUMBER_OF_FLYERS", "999999"))
+NUMBER_OF_IMAGES = int(os.getenv("NUMBER_OF_IMAGES", "999999"))
 INPUT_JSON = "results/flyers_first.json"
 OUTPUT_JSON = "results/flyer_images.json"
 HEADERS = {
@@ -13,22 +23,16 @@ HEADERS = {
 }
 
 
-def get_first_flyer():
-    """Read flyers_first.json and return the first flyer URL."""
-
+def get_retailers():
     with open(INPUT_JSON, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    retailer_name = next(iter(data))
-    retailer = data[retailer_name]
+    retailers = data["retailers"]
 
-    if not retailer["flyers"]:
-        raise Exception("No flyers found.")
+    if ENV == "dev":
+        retailers = retailers[:NUMBER_OF_RETAILERS]
 
-    flyer = retailer["flyers"][0]
-
-    return retailer_name, flyer["url"]
-
+    return retailers
 
 def fetch_html(url):
     with sync_playwright() as p:
@@ -67,8 +71,6 @@ def fetch_html(url):
 
 
 def extract_images(html):
-    """Extract every image inside the flyer slider."""
-
     soup = BeautifulSoup(html, "html.parser")
 
     slider = soup.find("ul", id="slider1")
@@ -88,10 +90,7 @@ def extract_images(html):
             or img.get("data-lazy")
         )
 
-        if not src:
-            continue
-
-        if src in seen:
+        if not src or src in seen:
             continue
 
         seen.add(src)
@@ -101,41 +100,66 @@ def extract_images(html):
             "alt": img.get("alt", "").strip()
         })
 
-    return images
+        if ENV == "dev" and len(images) >= NUMBER_OF_IMAGES:
+            break
 
+    return images
 
 def main():
     start_time = time.perf_counter()
 
-    retailer_name, flyer_url = get_first_flyer()
-
-    print("Retailer:", retailer_name)
-    print("Flyer:", flyer_url)
-
-    html = fetch_html(flyer_url)
-
-    images = extract_images(html)
-
-    print(f"Found {len(images)} images")
+    retailers = get_retailers()
 
     output = {
-        "city": "Jeddah",
-        "retailers": {
-            retailer_name: [
-                {
-                    "flyer_url": flyer_url,
-                    "image_count": len(images),
-                    "images": images
-                }
-            ]}}
+        "cities": [
+            {
+                "city": "Jeddah",
+                "retailers": []
+            }
+        ]
+    }
+
+    for retailer in retailers:
+
+        print(f"\nRetailer: {retailer['name']}")
+
+        retailer_output = {
+            "name": retailer["name"],
+            "flyers": []
+        }
+
+        flyers = retailer["flyers"]
+
+        if ENV == "dev":
+            flyers = flyers[:NUMBER_OF_FLYERS]
+
+        for flyer in flyers:
+
+            flyer_url = flyer["url"]
+
+            print(f"  Flyer: {flyer_url}")
+
+            html = fetch_html(flyer_url)
+
+            images = extract_images(html)
+
+            print(f"    Found {len(images)} images")
+
+            retailer_output["flyers"].append({
+                "flyer_url": flyer_url,
+                "image_count": len(images),
+                "images": images
+            })
+
+        output["cities"][0]["retailers"].append(retailer_output)
 
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
 
-    print(f"Saved image list to {OUTPUT_JSON}")
+    print(f"\nSaved image list to {OUTPUT_JSON}")
+
     end_time = time.perf_counter()
     print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
-
 
 if __name__ == "__main__":
     main()

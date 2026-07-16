@@ -17,8 +17,10 @@ import os
 import re
 import json
 import time
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+load_dotenv()
 SUPERMARKETS_JSON = "results/supermarkets.json"
 OUTPUT_JSON = "results/flyers_first.json"
 DEBUG_HTML_FILE = "htmls/debug_first_retailer_live.html"
@@ -34,11 +36,19 @@ HEADERS = {
 }
 
 
-def get_first_retailer():
-    """Reads supermarkets.json and returns (name, url) of the first entry only."""
+def get_retailers():
+    """
+    Reads supermarkets.json.
+
+    If ENV=dev:
+        returns the first NUMBER_OF_RETAILERS retailers.
+
+    Otherwise:
+        returns all retailers.
+    """
     if not os.path.exists(SUPERMARKETS_JSON):
         raise FileNotFoundError(
-            f"'{SUPERMARKETS_JSON}' not found. Run main.py first to generate it."
+            f"'{SUPERMARKETS_JSON}' not found. Run main.py first."
         )
 
     with open(SUPERMARKETS_JSON, "r", encoding="utf-8") as f:
@@ -47,9 +57,15 @@ def get_first_retailer():
     if not data:
         raise ValueError(f"'{SUPERMARKETS_JSON}' is empty.")
 
-    first_name = next(iter(data))
-    first_url = data[first_name]
-    return first_name, first_url
+    retailers = list(data.items())
+
+    env = os.getenv("ENV", "prod").lower()
+
+    if env == "dev":
+        limit = int(os.getenv("NUMBER_OF_RETAILERS", "1"))
+        retailers = retailers[:limit]
+
+    return retailers
 
 
 def fetch_live_html(url):
@@ -151,45 +167,51 @@ def run_diagnostics(html):
 
 def main():
     start_time = time.perf_counter()
-    name, url = get_first_retailer()
-    print(f"First retailer in {SUPERMARKETS_JSON}: {name}")
 
-    html, status_code = fetch_live_html(url)
+    retailers = get_retailers()
 
-    if not html:
-        print(f"\nCould not fetch live HTML (status: {status_code}). Nothing to extract.")
-        return
+    print(f"Processing {len(retailers)} retailer(s)...")
 
-    save_debug_html(html)
-
-    strict_flyers = extract_flyers_strict(html)
-
-    # Use whichever method actually found something, preferring the more
-    # precise ones first.
-    if strict_flyers:
-        final_flyers, method = strict_flyers, "strict"
-    else:
-        final_flyers, method = [], "none"
-
-    result = {
-        name: {
-            "retailer_url": url,
-            "extraction_method": method,
-            "flyers": final_flyers,
-        }
+    output = {
+        "retailers": []
     }
 
+    for index, (name, url) in enumerate(retailers, start=1):
+        print(f"\n[{index}/{len(retailers)}] Processing {name}")
+
+        html, status_code = fetch_live_html(url)
+
+        if not html:
+            print(f"Could not fetch {name} (status={status_code})")
+            continue
+
+        save_debug_html(html)
+
+        strict_flyers = extract_flyers_strict(html)
+
+        if strict_flyers:
+            flyers = strict_flyers
+            method = "strict"
+        else:
+            flyers = []
+            method = "none"
+
+        output["retailers"].append({
+            "name": name,
+            "retailer_url": url,
+            "extraction_method": method,
+            "flyers": flyers
+        })
+
+        print(f"Found {len(flyers)} flyer(s).")
+
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=4, ensure_ascii=False)
+        json.dump(output, f, indent=4, ensure_ascii=False)
 
-    print(f"\nSaved {len(final_flyers)} flyer(s) to '{OUTPUT_JSON}'.")
-
-    if not final_flyers:
-        print(
-            f"\nNo flyers found by any method."
-        )
     end_time = time.perf_counter()
-    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
+
+    print(f"\nSaved {len(output['retailers'])} retailer(s) to '{OUTPUT_JSON}'.")
+    print(f"Total execution time: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()
