@@ -15,6 +15,7 @@ class Product(BaseModel):
     original_price: float | None
     discounted_price: float | None
     merchant_name: str
+    city: str
 
 
 @app.get("/products", response_model=list[Product])
@@ -23,11 +24,15 @@ def get_products():
         data = json.load(f)
 
     products = []
-    for merchant_name, merchant_data in data.items():
-        for page in merchant_data.get("pages", []):
-            for product in page.get("products", []):
-                products.append(
-                    Product(merchant_name=merchant_name, **product)
-                )
+    for city in data.get("cities", []):
+        city_name = city["city"]
+        for retailer in city.get("retailers", []):
+            merchant_name = retailer["name"]
+            for flyer in retailer.get("flyers", []):
+                for page in flyer.get("pages", []):
+                    for product in page.get("products", []):
+                        products.append(
+                            Product(merchant_name=merchant_name, city=city_name, **product)
+                        )
 
     return products
