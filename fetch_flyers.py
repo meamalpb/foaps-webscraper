@@ -17,12 +17,15 @@ import os
 import re
 import json
 import time
+from datetime import datetime
+from bs4 import BeautifulSoup
+
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 load_dotenv()
 SUPERMARKETS_JSON = "results/supermarkets.json"
-OUTPUT_JSON = "results/flyers_first.json"
+OUTPUT_JSON = "results/flyers.json"
 DEBUG_HTML_FILE = "htmls/debug_first_retailer_live.html"
 
 # Playwright will handle its own modern User-Agent strings natively, 
@@ -116,13 +119,6 @@ def save_debug_html(html):
 from bs4 import BeautifulSoup
 
 def extract_flyers_strict(html):
-    """
-    Extract flyer links using BeautifulSoup.
-    Only accepts <a> tags with:
-      - title="Click here to view offers"
-      - class="product-image"
-    """
-
     flyers = []
     seen = set()
 
@@ -132,8 +128,7 @@ def extract_flyers_strict(html):
         if a.get("title") != "Click here to view offers":
             continue
 
-        classes = a.get("class", [])
-        if "product-image" not in classes:
+        if "product-image" not in a.get("class", []):
             continue
 
         href = a.get("href")
@@ -142,9 +137,30 @@ def extract_flyers_strict(html):
 
         seen.add(href)
 
+        # Look for the validity text in the same flyer card
+        valid_till = None
+        container = a.parent
+
+        while container:
+            span = container.find("span", class_="validTill")
+            if span:
+                text = span.get_text(" ", strip=True)
+
+                # Extract "Jul 21, 2026"
+                m = re.search(r'([A-Za-z]{3}\s+\d{1,2},\s+\d{4})', text)
+                if m:
+                    valid_till = datetime.strptime(
+                        m.group(1),
+                        "%b %d, %Y"
+                    ).strftime("%Y-%m-%d")
+                break
+
+            container = container.parent
+
         flyers.append({
             "id": a.get("id"),
             "url": href,
+            "valid_till": valid_till
         })
 
     return flyers

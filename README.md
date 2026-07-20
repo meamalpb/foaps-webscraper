@@ -127,7 +127,7 @@ Stop the server with `Ctrl+C`.
 │
 ├── results/
 │   ├── supermarkets.json
-│   ├── flyers_first.json
+│   ├── flyers.json
 │   ├── flyer_images.json
 │   └── products.json
 │
@@ -150,7 +150,7 @@ Stop the server with `Ctrl+C`.
 | File | Description |
 |------|-------------|
 | `results/supermarkets.json` | Extracted supermarket names and URLs |
-| `results/flyers_first.json` | Flyer URLs for the first supermarket |
+| `results/flyers.json` | Flyer URLs for the first supermarket |
 | `results/flyer_images.json` | Image URLs for the first flyer |
 | `results/products.json` | Product details (name, description, prices) extracted per flyer image |
 | `htmls/` | Debug HTML snapshots used during scraping |

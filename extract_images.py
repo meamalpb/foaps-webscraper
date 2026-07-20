@@ -13,7 +13,7 @@ ENV = os.getenv("ENV", "prod").lower()
 NUMBER_OF_RETAILERS = int(os.getenv("NUMBER_OF_RETAILERS", "999999"))
 NUMBER_OF_FLYERS = int(os.getenv("NUMBER_OF_FLYERS", "999999"))
 NUMBER_OF_IMAGES = int(os.getenv("NUMBER_OF_IMAGES", "999999"))
-INPUT_JSON = "results/flyers_first.json"
+INPUT_JSON = "results/flyers.json"
 OUTPUT_JSON = "results/flyer_images.json"
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
