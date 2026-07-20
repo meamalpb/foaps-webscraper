@@ -152,7 +152,7 @@ def extract_flyers_strict(html):
                     valid_till = datetime.strptime(
                         m.group(1),
                         "%b %d, %Y"
-                    ).strftime("%Y-%m-%d")
+                    ).strftime("%d-%m-%Y")
                 break
 
             container = container.parent

@@ -136,6 +136,7 @@ def main():
         for flyer in flyers:
 
             flyer_url = flyer["url"]
+            expires_by = flyer["valid_till"]
 
             print(f"  Flyer: {flyer_url}")
 
@@ -148,6 +149,7 @@ def main():
             retailer_output["flyers"].append({
                 "flyer_url": flyer_url,
                 "image_count": len(images),
+                "expires_by": expires_by,
                 "images": images
             })
 
