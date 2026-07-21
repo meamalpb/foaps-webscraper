@@ -6,9 +6,9 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.18.5",
+    "anthropic[bedrock]>=0.70.0",
     "bs4>=0.0.2",
     "fastapi>=0.139.0",
-    "google-genai>=1.0.0",
     "paddleocr>=3.7.0",
     "pillow>=12.3.0",
     "playwright>=1.61.0",
