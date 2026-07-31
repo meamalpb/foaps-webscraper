@@ -125,11 +125,11 @@ def main():
 
         retailer_output = {
             "name": retailer["name"],
-            "flyers": []
+            "flyers": [],
+            "stores": retailer["stores"]
         }
 
         flyers = retailer["flyers"]
-
         if ENV == "dev":
             flyers = flyers[:NUMBER_OF_FLYERS]
 

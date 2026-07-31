@@ -70,6 +70,32 @@ def get_retailers():
 
     return retailers
 
+def extract_stores(html):
+    """
+    Extracts the `myData` JS array (store/location list) embedded in the page's
+    <script> block and maps it to a simplified store dict.
+    """
+    stores = []
+
+    match = re.search(r'var\s+myData\s*=\s*(\[.*?\]);', html, re.DOTALL)
+    if not match:
+        return stores
+
+    try:
+        raw_data = json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        print(f"  Warning: failed to parse myData JSON: {e}")
+        return stores
+
+    for store in raw_data:
+        stores.append({
+            "Name": store.get("Name_en"),
+            "Address_en": store.get("Address_en"),
+            "Latitude": store.get("Latitude"),
+            "Longitude": store.get("Longitude"),
+        })
+
+    return stores
 
 def fetch_live_html(url):
     """Fetches a single URL live using Playwright. Returns (html_text, status_code) or (None, status_code/None)."""
@@ -197,6 +223,7 @@ def main():
 
         html, status_code = fetch_live_html(url)
 
+
         if not html:
             print(f"Could not fetch {name} (status={status_code})")
             continue
@@ -204,6 +231,7 @@ def main():
         save_debug_html(html)
 
         strict_flyers = extract_flyers_strict(html)
+        stores = extract_stores(html)
 
         if strict_flyers:
             flyers = strict_flyers
@@ -216,7 +244,9 @@ def main():
             "name": name,
             "retailer_url": url,
             "extraction_method": method,
-            "flyers": flyers
+            "flyers": flyers,
+            "stores": stores
+
         })
 
         print(f"Found {len(flyers)} flyer(s).")
