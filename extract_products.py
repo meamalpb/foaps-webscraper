@@ -10,6 +10,8 @@ import requests
 from anthropic import AnthropicBedrockMantle
 from dotenv import load_dotenv
 
+from categories import ALL_SUBCATEGORIES, MAIN_CATEGORIES, format_taxonomy_for_prompt
+
 EXPIRES_BY_FORMAT = "%d-%m-%Y"
 
 load_dotenv()
@@ -30,8 +32,17 @@ PRODUCT_ITEM_SCHEMA = {
         "description": {"type": "string"},
         "original_price": {"type": ["number", "null"]},
         "discounted_price": {"type": ["number", "null"]},
+        "category": {"type": "string", "enum": MAIN_CATEGORIES},
+        "subcategory": {"type": "string", "enum": ALL_SUBCATEGORIES},
     },
-    "required": ["name", "description", "original_price", "discounted_price"],
+    "required": [
+        "name",
+        "description",
+        "original_price",
+        "discounted_price",
+        "category",
+        "subcategory",
+    ],
 }
 
 BATCH_PRODUCT_SCHEMA = {
@@ -77,7 +88,12 @@ BATCH_PROMPT = (
     "identifiable products (e.g. a cover page or logo), return an empty "
     "products list for it. Call the record_products tool with one entry per "
     "page, with 'page_index' matching the page's label (1-based), covering "
-    "every page provided."
+    "every page provided.\n\n"
+    "Also assign each product a category and subcategory from this exact "
+    "taxonomy (use the main category name as 'category' and one of its listed "
+    "subcategories as 'subcategory'; if nothing fits well, use category "
+    "'Other' with subcategory 'Unknown'):\n\n"
+    f"{format_taxonomy_for_prompt()}"
 )
 
 

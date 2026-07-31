@@ -2,6 +2,7 @@ htmls/
 results/
 .DS_Store
 .env
+*.db
 
 # Python-generated files
 __pycache__/

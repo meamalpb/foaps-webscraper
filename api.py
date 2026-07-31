@@ -3,12 +3,25 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from chat import router as chat_router
+from db import init_db
 
 PRODUCTS_JSON = Path("results/products.json")
 EXPIRES_BY_FORMAT = "%d-%m-%Y"
 
 app = FastAPI(title="FOAPS Flyer Products API")
+init_db()
+app.include_router(chat_router)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/")
+def chat_ui():
+    return FileResponse("static/chat.html")
 
 
 class Product(BaseModel):
@@ -16,6 +29,8 @@ class Product(BaseModel):
     description: str
     original_price: float | None
     discounted_price: float | None
+    category: str
+    subcategory: str
     merchant_name: str
     city: str
     expires_by: str | None
