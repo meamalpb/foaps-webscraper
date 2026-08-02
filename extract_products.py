@@ -314,8 +314,17 @@ def main():
             retailer_name = retailer["name"]
             output_retailer = find_or_create(
                 output_city["retailers"], "name", retailer_name,
-                lambda: {"name": retailer_name, "flyers": []},
+                lambda: {"name": retailer_name, "flyers": [], "stores": []},
             )
+            output_retailer["stores"] = [
+                {
+                    "name": s["Name"],
+                    "address": s["Address_en"],
+                    "latitude": s["Latitude"],
+                    "longitude": s["Longitude"],
+                }
+                for s in retailer.get("stores", [])
+            ]
 
             print(f"\n{city_name} / {retailer_name}")
 

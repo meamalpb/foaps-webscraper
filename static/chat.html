@@ -68,6 +68,70 @@
   #input { flex: 1; padding: 0.6rem; border-radius: 6px; border: 1px solid #8884; font-size: 1rem; }
   #send { padding: 0.6rem 1.2rem; border-radius: 6px; border: none; background: #2563eb; color: white; cursor: pointer; }
   #send:disabled { opacity: 0.5; cursor: default; }
+
+  #location-status {
+    font-size: 0.8rem;
+    opacity: 0.65;
+    margin-top: 0.5rem;
+  }
+  #location-status button {
+    background: none;
+    border: none;
+    color: #2563eb;
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  #location-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #location-modal {
+    background: Canvas;
+    color: CanvasText;
+    border-radius: 10px;
+    padding: 1.5rem;
+    max-width: 320px;
+    width: 90%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  #location-modal h2 { font-size: 1.05rem; margin: 0; }
+  #location-modal p { margin: 0; opacity: 0.8; font-size: 0.9rem; }
+  #location-modal button.primary {
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    border: none;
+    background: #2563eb;
+    color: white;
+    cursor: pointer;
+    font-size: 0.95rem;
+  }
+  #location-modal .divider {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    opacity: 0.6;
+    font-size: 0.8rem;
+  }
+  #location-modal .divider hr { flex: 1; border: none; border-top: 1px solid #8884; }
+  #location-modal .coords-row { display: flex; gap: 0.5rem; }
+  #location-modal .coords-row input {
+    width: 0;
+    flex: 1;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid #8884;
+    font-size: 0.9rem;
+  }
+  #location-modal .modal-error { color: #dc2626; font-size: 0.85rem; min-height: 1rem; }
   .typing { display: flex; gap: 0.25rem; align-items: center; padding: 0.65rem 0.75rem; }
   .typing span {
     width: 6px;
@@ -101,10 +165,28 @@
     <input id="input" type="text" placeholder="Ask about deals, prices, or Souq AI..." />
     <button id="send">Send</button>
   </div>
+  <div id="location-status"></div>
+</div>
+
+<div id="location-overlay" class="hidden">
+  <div id="location-modal">
+    <h2>Share your location</h2>
+    <p>Souq AI needs your location to find the nearest stores and deals.</p>
+    <button id="use-current-location" class="primary">Use my current location</button>
+    <div class="divider"><hr />or enter coordinates<hr /></div>
+    <div class="coords-row">
+      <input id="lat-input" type="number" step="any" placeholder="Latitude" />
+      <input id="lng-input" type="number" step="any" placeholder="Longitude" />
+    </div>
+    <button id="submit-coords" class="primary">Submit</button>
+    <div class="modal-error" id="location-error"></div>
+  </div>
 </div>
 
 <script>
   const PHONE_STORAGE_KEY = "souq_ai_phone_number";
+  const LAT_STORAGE_KEY = "souq_ai_latitude";
+  const LNG_STORAGE_KEY = "souq_ai_longitude";
 
   const gateEl = document.getElementById("gate");
   const phoneInputEl = document.getElementById("phone-input");
@@ -115,8 +197,97 @@
   const messagesEl = document.getElementById("messages");
   const inputEl = document.getElementById("input");
   const sendEl = document.getElementById("send");
+  const locationStatusEl = document.getElementById("location-status");
+
+  const locationOverlayEl = document.getElementById("location-overlay");
+  const useCurrentLocationEl = document.getElementById("use-current-location");
+  const latInputEl = document.getElementById("lat-input");
+  const lngInputEl = document.getElementById("lng-input");
+  const submitCoordsEl = document.getElementById("submit-coords");
+  const locationErrorEl = document.getElementById("location-error");
 
   let phoneNumber = null;
+  let coords = null;
+  let pendingRetryMessage = null;
+
+  function loadStoredCoords() {
+    const lat = localStorage.getItem(LAT_STORAGE_KEY);
+    const lng = localStorage.getItem(LNG_STORAGE_KEY);
+    if (lat !== null && lng !== null) {
+      coords = { latitude: parseFloat(lat), longitude: parseFloat(lng) };
+    }
+    renderLocationStatus();
+  }
+
+  function saveCoords(latitude, longitude) {
+    coords = { latitude, longitude };
+    localStorage.setItem(LAT_STORAGE_KEY, String(latitude));
+    localStorage.setItem(LNG_STORAGE_KEY, String(longitude));
+    renderLocationStatus();
+  }
+
+  function renderLocationStatus() {
+    locationStatusEl.innerHTML = "";
+    if (coords) {
+      locationStatusEl.append(
+        `Location: ${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)} `
+      );
+    } else {
+      locationStatusEl.append("Location: not shared ");
+    }
+    const link = document.createElement("button");
+    link.textContent = coords ? "change" : "set";
+    link.addEventListener("click", () => {
+      pendingRetryMessage = null;
+      openLocationModal();
+    });
+    locationStatusEl.appendChild(link);
+  }
+
+  function openLocationModal() {
+    locationErrorEl.textContent = "";
+    latInputEl.value = coords ? coords.latitude : "";
+    lngInputEl.value = coords ? coords.longitude : "";
+    locationOverlayEl.classList.remove("hidden");
+  }
+
+  function closeLocationModal() {
+    locationOverlayEl.classList.add("hidden");
+  }
+
+  function onLocationProvided(latitude, longitude) {
+    saveCoords(latitude, longitude);
+    closeLocationModal();
+    if (pendingRetryMessage) {
+      const message = pendingRetryMessage;
+      pendingRetryMessage = null;
+      sendMessage({ text: message, silent: true });
+    }
+  }
+
+  useCurrentLocationEl.addEventListener("click", () => {
+    if (!navigator.geolocation) {
+      locationErrorEl.textContent = "Geolocation isn't available in this browser - enter coordinates manually.";
+      return;
+    }
+    locationErrorEl.textContent = "Requesting location...";
+    navigator.geolocation.getCurrentPosition(
+      (position) => onLocationProvided(position.coords.latitude, position.coords.longitude),
+      () => {
+        locationErrorEl.textContent = "Couldn't get your location - enter coordinates manually below.";
+      }
+    );
+  });
+
+  submitCoordsEl.addEventListener("click", () => {
+    const latitude = parseFloat(latInputEl.value);
+    const longitude = parseFloat(lngInputEl.value);
+    if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+      locationErrorEl.textContent = "Please enter valid latitude and longitude values.";
+      return;
+    }
+    onLocationProvided(latitude, longitude);
+  });
 
   function addMessage(text, cls, category) {
     const wrap = document.createElement("div");
@@ -157,6 +328,7 @@
   async function enterChat(number) {
     phoneNumber = number;
     localStorage.setItem(PHONE_STORAGE_KEY, phoneNumber);
+    loadStoredCoords();
     gateEl.classList.add("hidden");
     appEl.classList.remove("hidden");
     await loadHistory();
@@ -176,20 +348,28 @@
     if (e.key === "Enter") gateSubmitEl.click();
   });
 
-  async function sendMessage() {
-    const text = inputEl.value.trim();
+  async function sendMessage(options) {
+    const opts = options || {};
+    const text = opts.silent ? opts.text : inputEl.value.trim();
     if (!text) return;
 
-    addMessage(text, "user");
-    inputEl.value = "";
+    if (!opts.silent) {
+      addMessage(text, "user");
+      inputEl.value = "";
+    }
     sendEl.disabled = true;
     const typingEl = addTypingIndicator();
 
     try {
+      const body = { message: text, phone_number: phoneNumber };
+      if (coords) {
+        body.latitude = coords.latitude;
+        body.longitude = coords.longitude;
+      }
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, phone_number: phoneNumber }),
+        body: JSON.stringify(body),
       });
       typingEl.remove();
       if (!res.ok) {
@@ -198,6 +378,10 @@
       }
       const data = await res.json();
       addMessage(data.reply, "bot", data.category);
+      if (data.needs_location) {
+        pendingRetryMessage = text;
+        openLocationModal();
+      }
     } catch (err) {
       typingEl.remove();
       addMessage(`Network error: ${err.message}`, "error");
@@ -207,7 +391,7 @@
     }
   }
 
-  sendEl.addEventListener("click", sendMessage);
+  sendEl.addEventListener("click", () => sendMessage());
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendMessage();
   });

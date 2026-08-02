@@ -24,6 +24,13 @@ def chat_ui():
     return FileResponse("static/chat.html")
 
 
+class Store(BaseModel):
+    name: str
+    address: str
+    latitude: float
+    longitude: float
+
+
 class Product(BaseModel):
     name: str
     description: str
@@ -34,6 +41,7 @@ class Product(BaseModel):
     merchant_name: str
     city: str
     expires_by: str | None
+    stores: list[Store]
 
 
 def is_expired(expires_by):
@@ -56,6 +64,7 @@ def get_products():
         city_name = city["city"]
         for retailer in city.get("retailers", []):
             merchant_name = retailer["name"]
+            stores = retailer.get("stores", [])
             for flyer in retailer.get("flyers", []):
                 expires_by = flyer.get("expires_by")
                 if is_expired(expires_by):
@@ -67,6 +76,7 @@ def get_products():
                                 merchant_name=merchant_name,
                                 city=city_name,
                                 expires_by=expires_by,
+                                stores=stores,
                                 **product,
                             )
                         )

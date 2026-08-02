@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 from datetime import datetime
@@ -102,8 +103,17 @@ PRODUCT_SEARCH_TOOL = {
                 "type": ["string", "null"],
                 "description": "City the user wants results for, if mentioned; null otherwise.",
             },
+            "near_me": {
+                "type": "boolean",
+                "description": (
+                    "True if the user is asking for the nearest store or "
+                    "deals near their current location (e.g. 'best deals "
+                    "near me', 'closest place to buy milk', 'nearest Hyper "
+                    "Panda'); false otherwise."
+                ),
+            },
         },
-        "required": ["items", "city"],
+        "required": ["items", "city", "near_me"],
     },
 }
 
@@ -129,8 +139,47 @@ PRICE_COMPARE_TOOL = {
                 "items": {"type": "string"},
                 "description": "Cities to restrict the comparison to, if mentioned; empty means no restriction.",
             },
+            "near_me": {
+                "type": "boolean",
+                "description": (
+                    "True if the user is asking to compare based on nearest "
+                    "store or proximity to their current location; false "
+                    "otherwise."
+                ),
+            },
         },
-        "required": ["items", "cities"],
+        "required": ["items", "cities", "near_me"],
+    },
+}
+
+STORE_INFO_TOOL = {
+    "name": "classify_store_info",
+    "description": (
+        "The user is asking for details (address, location) about a "
+        "specific store, including follow-ups like 'give me the address of "
+        "that store' referring to a store named earlier in the "
+        "conversation. Not for product searches or price comparisons."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "store_name": {
+                "type": "string",
+                "description": (
+                    "The store the user is asking about, resolved from the "
+                    "message itself or, for a follow-up like 'that store', "
+                    "from the most recently mentioned store in the recent "
+                    "conversation transcript. Prior replies often mention "
+                    "both a retailer/chain name and a specific branch name "
+                    "together (e.g. 'at Hyper Panda (Panda N2 Mall, "
+                    "Jeddah)') - always prefer the more specific branch "
+                    "name ('Panda N2 Mall'), not the general chain name "
+                    "('Hyper Panda'), since that's the actual location being "
+                    "discussed. Empty string if nothing can be resolved."
+                ),
+            },
+        },
+        "required": ["store_name"],
     },
 }
 
@@ -144,12 +193,15 @@ INVALID_TOOL = {
     "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
-CLASSIFICATION_TOOLS = [ONBOARDING_TOOL, PRODUCT_SEARCH_TOOL, PRICE_COMPARE_TOOL, INVALID_TOOL]
+CLASSIFICATION_TOOLS = [
+    ONBOARDING_TOOL, PRODUCT_SEARCH_TOOL, PRICE_COMPARE_TOOL, STORE_INFO_TOOL, INVALID_TOOL,
+]
 
 TOOL_NAME_TO_CATEGORY = {
     "classify_onboarding": "Onboarding",
     "classify_product_search": "ProductSearch",
     "classify_price_compare": "PriceCompare",
+    "classify_store_info": "StoreInfo",
     "classify_invalid": "Invalid",
 }
 
@@ -160,18 +212,27 @@ CLASSIFY_PROMPT = (
     "message: classify_onboarding for questions about Souq AI itself, "
     "classify_product_search for someone looking for products, "
     "classify_price_compare for someone wanting to compare prices across "
-    "stores/cities, or classify_invalid for anything else.\n\n"
+    "stores/cities, classify_store_info for someone asking for details "
+    "(like an address) about a specific store - including a bare follow-up "
+    "like 'what's the address of that store', which refers to a store "
+    "named earlier in the conversation - or classify_invalid for anything "
+    "else.\n\n"
     "For classify_product_search and classify_price_compare, also resolve "
     "the user's request onto this exact product taxonomy when it clearly "
     "maps to a category (e.g. 'smartphone', 'android phone', and 'cell "
     "phone' should all resolve to category 'Electronics', subcategory "
     "'Smartphones'); leave category/subcategory null if nothing fits well:\n\n"
     f"{format_taxonomy_for_prompt()}\n\n"
+    "For classify_product_search and classify_price_compare, also set "
+    "near_me to true if the user is asking for the nearest store or deals "
+    "near their current location (e.g. 'best deals near me', 'closest "
+    "place to buy milk', 'what's the nearest Hyper Panda') - this is valid "
+    "even with an empty items list, if no specific product was mentioned.\n\n"
     "Recent conversation (may be empty, most recent last):\n{transcript}\n\n"
     "User message: {message}"
 )
 
-_products_cache = {"mtime": None, "size": None, "data": []}
+_products_cache = {"mtime": None, "size": None, "data": [], "stores_index": {}}
 
 
 def is_expired(expires_by):
@@ -185,11 +246,17 @@ def is_expired(expires_by):
 
 
 def flatten_products(data):
+    """Returns (flattened products, stores index). The stores index is kept
+    separate - {(city, merchant_name): [stores]} - rather than denormalized
+    onto every product row, so a 10k+ product catalog doesn't carry a
+    repeated stores array on each entry just to support distance lookups."""
     products = []
+    stores_index = {}
     for city in data.get("cities", []):
         city_name = city.get("city")
         for retailer in city.get("retailers", []):
             merchant_name = retailer.get("name")
+            stores_index[(city_name, merchant_name)] = retailer.get("stores", [])
             for flyer in retailer.get("flyers", []):
                 expires_by = flyer.get("expires_by")
                 if is_expired(expires_by):
@@ -207,29 +274,131 @@ def flatten_products(data):
                             "city": city_name,
                             "expires_by": expires_by,
                         })
-    return products
+    return products, stores_index
 
 
-def load_products():
+def _load_data():
     try:
         stat = PRODUCTS_JSON.stat()
     except FileNotFoundError:
-        return []
+        return [], {}
 
     if _products_cache["mtime"] == stat.st_mtime and _products_cache["size"] == stat.st_size:
-        return _products_cache["data"]
+        return _products_cache["data"], _products_cache["stores_index"]
 
     try:
         with open(PRODUCTS_JSON, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return []
+        return [], {}
 
-    flattened = flatten_products(data)
+    flattened, stores_index = flatten_products(data)
     _products_cache["mtime"] = stat.st_mtime
     _products_cache["size"] = stat.st_size
     _products_cache["data"] = flattened
-    return flattened
+    _products_cache["stores_index"] = stores_index
+    return flattened, stores_index
+
+
+def load_products():
+    return _load_data()[0]
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def nearest_store(city, merchant_name, latitude, longitude):
+    """Returns (store_name, distance_km) for the closest of that merchant's
+    stores in this city, or None if it has no store locations on file."""
+    _, stores_index = _load_data()
+    stores = stores_index.get((city, merchant_name)) or []
+    if not stores:
+        return None
+    best = min(
+        stores,
+        key=lambda s: haversine_km(latitude, longitude, s["latitude"], s["longitude"]),
+    )
+    return best["name"], haversine_km(latitude, longitude, best["latitude"], best["longitude"])
+
+
+def nearby_stores(latitude, longitude, limit=MAX_MATCHES):
+    """All stores across all retailers/cities, nearest first - used for a
+    plain 'what's the nearest store to me' query with no product mentioned."""
+    _, stores_index = _load_data()
+    entries = []
+    for (city, merchant_name), stores in stores_index.items():
+        for store in stores:
+            distance = haversine_km(latitude, longitude, store["latitude"], store["longitude"])
+            entries.append((distance, city, merchant_name, store))
+    entries.sort(key=lambda e: e[0])
+    return entries[:limit]
+
+
+def all_stores():
+    """Flattens stores_index into one list, each entry carrying its
+    merchant/city alongside the store's own fields."""
+    _, stores_index = _load_data()
+    return [
+        {"city": city, "merchant_name": merchant_name, **store}
+        for (city, merchant_name), stores in stores_index.items()
+        for store in stores
+    ]
+
+
+def find_store(store_name, latitude=None, longitude=None):
+    """Resolves a free-text store_name to a specific store. Returns:
+    - {"store": <store dict with city/merchant_name>, "distance_km": float|None} on a confident match
+    - {"candidates": [...]} when it matches a merchant with multiple branches and can't narrow further
+    - None when nothing matches at all."""
+    stores = all_stores()
+    if not store_name or not stores:
+        return None
+
+    name_lower = store_name.lower()
+
+    def distance_to(store):
+        if latitude is None or longitude is None:
+            return None
+        return haversine_km(latitude, longitude, store["latitude"], store["longitude"])
+
+    def resolve(matches):
+        if len(matches) == 1:
+            return {"store": matches[0], "distance_km": distance_to(matches[0])}
+        if latitude is not None and longitude is not None:
+            best = min(matches, key=distance_to)
+            return {"store": best, "distance_km": distance_to(best)}
+        return {"candidates": matches[:5]}
+
+    # Tier 1: match on the merchant/retailer name (e.g. "Hyper Panda" or
+    # "Othaim") - checked first, since several branch names also happen to
+    # embed the merchant name (e.g. "Hyper Panda King Road"), which would
+    # otherwise make a bare merchant query only match that subset of
+    # branches and miss closer ones named differently (e.g. "Panda N2 Mall").
+    by_merchant = [s for s in stores if name_lower in s["merchant_name"].lower()]
+    if by_merchant:
+        return resolve(by_merchant)
+
+    # Tier 2: match on the store's own branch name (substring, then fuzzy) -
+    # the common case for a follow-up naming one specific branch.
+    exact = [s for s in stores if name_lower in s["name"].lower()]
+    if not exact:
+        haystacks = [s["name"].lower() for s in stores]
+        results = process.extract(
+            name_lower, haystacks, scorer=fuzz.partial_ratio,
+            score_cutoff=FUZZY_SCORE_CUTOFF, limit=None,
+        )
+        exact = [stores[idx] for _choice, _score, idx in results]
+
+    if exact:
+        return resolve(exact)
+
+    return None
 
 
 def match_by_keywords(products, keywords):
@@ -308,12 +477,29 @@ def filter_by_cities(products, cities):
     return products, True
 
 
-def sort_and_cap(products):
+def rank_and_cap(products, latitude, longitude, near_me):
+    """Sorts by nearest-store distance when a near-me location is available
+    and relevant, otherwise by price (the existing default). Either way,
+    caps to MAX_MATCHES and returns the total match count before capping."""
     total = len(products)
-    ordered = sorted(
-        products,
-        key=lambda p: p["discounted_price"] if p["discounted_price"] is not None else float("inf"),
-    )
+    if near_me and latitude is not None and longitude is not None:
+        enriched = []
+        for p in products:
+            info = nearest_store(p["city"], p["merchant_name"], latitude, longitude)
+            enriched.append({
+                **p,
+                "_nearest_store": info[0] if info else None,
+                "_distance_km": info[1] if info else None,
+            })
+        ordered = sorted(
+            enriched,
+            key=lambda p: p["_distance_km"] if p["_distance_km"] is not None else float("inf"),
+        )
+    else:
+        ordered = sorted(
+            products,
+            key=lambda p: p["discounted_price"] if p["discounted_price"] is not None else float("inf"),
+        )
     return ordered[:MAX_MATCHES], total
 
 
@@ -321,14 +507,27 @@ def format_products_for_prompt(products, total):
     if not products:
         return "No matching products were found."
 
-    lines = [
-        f"- {p['name']} ({p['description']}) at {p['merchant_name']}, {p['city']}: "
-        f"original price {p['original_price']}, discounted price {p['discounted_price']}"
-        for p in products
-    ]
+    lines = []
+    for p in products:
+        line = (
+            f"- {p['name']} ({p['description']}) at {p['merchant_name']}, {p['city']}: "
+            f"original price {p['original_price']}, discounted price {p['discounted_price']}"
+        )
+        if p.get("_distance_km") is not None:
+            line += f" ({p['_nearest_store']}, {p['_distance_km']:.1f} km away)"
+        lines.append(line)
     if total > len(products):
         lines.append(f"(showing {len(products)} of {total} matches)")
     return "\n".join(lines)
+
+
+def format_nearby_stores(entries):
+    if not entries:
+        return "No store locations were found."
+    return "\n".join(
+        f"- {merchant_name} ({store['name']}, {city}): {distance:.1f} km away"
+        for distance, city, merchant_name, store in entries
+    )
 
 
 def format_transcript(messages):
@@ -391,7 +590,7 @@ def generate_grounded_reply(prompt):
     return call_with_retry(make_request)
 
 
-def handle_onboarding(message, extracted, transcript):
+def handle_onboarding(message, extracted, transcript, latitude=None, longitude=None):
     prompt = (
         "You are Souq AI's assistant. Answer the user's question about Souq "
         "AI using ONLY the following facts; do not invent features, prices, "
@@ -403,10 +602,26 @@ def handle_onboarding(message, extracted, transcript):
     return generate_grounded_reply(prompt) or SOUQ_AI_DESCRIPTION
 
 
-def handle_product_search(message, extracted, transcript):
-    items = extracted.get("items") or [{"query": message, "category": None, "subcategory": None}]
+def handle_product_search(message, extracted, transcript, latitude=None, longitude=None):
+    raw_items = extracted.get("items") or []
+    near_me = extracted.get("near_me", False)
     city = extracted.get("city")
 
+    if near_me and not raw_items and latitude is not None and longitude is not None:
+        entries = nearby_stores(latitude, longitude)
+        context = format_nearby_stores(entries)
+        prompt = (
+            "You are Souq AI's shopping assistant. The user asked about the "
+            f"nearest store(s) to them, without mentioning a specific product: \"{message}\".\n\n"
+            f"Recent conversation (may be empty):\n{transcript}\n\n"
+            f"Here are the nearest store locations:\n{context}\n\n"
+            "Write a short, friendly reply listing the closest few stores "
+            f"with their distance. {PLAIN_TEXT_INSTRUCTION}"
+        )
+        reply = generate_grounded_reply(prompt)
+        return reply or "I couldn't find any nearby stores right now. Please try again later."
+
+    items = raw_items or [{"query": message, "category": None, "subcategory": None}]
     products = load_products()
     sections = []
     any_matched = False
@@ -414,7 +629,7 @@ def handle_product_search(message, extracted, transcript):
         query = item.get("query") or message
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, [city] if city else [])
-        matched, total = sort_and_cap(matched)
+        matched, total = rank_and_cap(matched, latitude, longitude, near_me)
         any_matched = any_matched or bool(matched)
         sections.append(format_item_section(query, matched, total, city_fallback, f'the city "{city}"'))
 
@@ -439,9 +654,10 @@ def handle_product_search(message, extracted, transcript):
     return "I couldn't find any matching products right now. Try a different search term or check back later."
 
 
-def handle_price_compare(message, extracted, transcript):
+def handle_price_compare(message, extracted, transcript, latitude=None, longitude=None):
     items = extracted.get("items") or [{"query": message, "category": None, "subcategory": None}]
     cities = extracted.get("cities") or []
+    near_me = extracted.get("near_me", False)
 
     products = load_products()
     sections = []
@@ -450,7 +666,7 @@ def handle_price_compare(message, extracted, transcript):
         query = item.get("query") or message
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, cities)
-        matched, total = sort_and_cap(matched)
+        matched, total = rank_and_cap(matched, latitude, longitude, near_me)
         any_matched = any_matched or bool(matched)
         sections.append(format_item_section(query, matched, total, city_fallback, "the requested cities"))
 
@@ -473,7 +689,7 @@ def handle_price_compare(message, extracted, transcript):
     return "I couldn't find any matching products to compare right now. Try a different product name or check back later."
 
 
-def handle_invalid(message, extracted, transcript):
+def handle_invalid(message, extracted, transcript, latitude=None, longitude=None):
     prompt = (
         "You are Souq AI's assistant. Souq AI only helps with finding "
         "product deals, comparing prices, and answering questions about "
@@ -489,10 +705,54 @@ def handle_invalid(message, extracted, transcript):
     return generate_grounded_reply(prompt) or fallback
 
 
+def handle_store_info(message, extracted, transcript, latitude=None, longitude=None):
+    store_name = extracted.get("store_name") or ""
+    result = find_store(store_name, latitude, longitude)
+
+    if result is None:
+        prompt = (
+            "You are Souq AI's assistant. The user asked for store details, "
+            "but no specific store could be identified from their message or "
+            f"the recent conversation.\n\nRecent conversation (may be empty):\n{transcript}\n\n"
+            f"User message: \"{message}\"\n"
+            "Ask them, briefly and in a friendly way, which store they mean. "
+            f"{PLAIN_TEXT_INSTRUCTION}"
+        )
+        fallback = "Which store did you mean? Let me know the name and I'll look up its address."
+        return generate_grounded_reply(prompt) or fallback
+
+    if "candidates" in result:
+        lines = "\n".join(
+            f"- {s['merchant_name']} ({s['name']}), {s['city']}: {s['address']}"
+            for s in result["candidates"]
+        )
+        prompt = (
+            "You are Souq AI's assistant. The user asked for a store's "
+            f"address: \"{message}\". Multiple branches matched:\n{lines}\n\n"
+            "Ask them to clarify which branch they mean (or offer to narrow "
+            f"it down if they share their location). {PLAIN_TEXT_INSTRUCTION}"
+        )
+        fallback = "There are a few matching branches:\n" + lines + "\nWhich one did you mean?"
+        return generate_grounded_reply(prompt) or fallback
+
+    store = result["store"]
+    distance_note = f", {result['distance_km']:.1f} km away" if result["distance_km"] is not None else ""
+    context = f"{store['merchant_name']} - {store['name']}, {store['city']}: {store['address']}{distance_note}"
+    prompt = (
+        "You are Souq AI's assistant. Answer the user's question about this "
+        f"store using ONLY these facts, do not invent anything: {context}\n\n"
+        f"Recent conversation (may be empty):\n{transcript}\n\n"
+        f"User message: \"{message}\"\n"
+        f"Reply in 1-2 sentences. {PLAIN_TEXT_INSTRUCTION}"
+    )
+    return generate_grounded_reply(prompt) or context
+
+
 DISPATCH = {
     "Onboarding": handle_onboarding,
     "ProductSearch": handle_product_search,
     "PriceCompare": handle_price_compare,
+    "StoreInfo": handle_store_info,
     "Invalid": handle_invalid,
 }
 
@@ -500,11 +760,14 @@ DISPATCH = {
 class ChatRequest(BaseModel):
     message: str
     phone_number: str
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class ChatResponse(BaseModel):
     category: str
     reply: str
+    needs_location: bool = False
 
 
 class HistoryMessage(BaseModel):
@@ -515,24 +778,37 @@ class HistoryMessage(BaseModel):
 router = APIRouter()
 
 
+LOCATION_REQUEST_REPLY = (
+    "To show you the nearest deals, I need your current location - please "
+    "share it and I'll take another look."
+)
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     history = get_recent_messages(request.phone_number, MAX_HISTORY_EXCHANGES * 2)
     transcript = format_transcript(history)
 
     result = classify_message(request.message, transcript)
+    needs_location = False
     if result is None:
         category, reply = "Invalid", (
             "Sorry, I'm having trouble understanding right now - please try again in a moment."
         )
     else:
         category, extracted = result
-        handler = DISPATCH.get(category, handle_invalid)
-        reply = handler(request.message, extracted, transcript)
+        wants_nearby = category in ("ProductSearch", "PriceCompare") and extracted.get("near_me")
+        has_location = request.latitude is not None and request.longitude is not None
+        if wants_nearby and not has_location:
+            needs_location = True
+            reply = LOCATION_REQUEST_REPLY
+        else:
+            handler = DISPATCH.get(category, handle_invalid)
+            reply = handler(request.message, extracted, transcript, request.latitude, request.longitude)
 
     save_message(request.phone_number, "user", request.message)
     save_message(request.phone_number, "assistant", reply)
-    return ChatResponse(category=category, reply=reply)
+    return ChatResponse(category=category, reply=reply, needs_location=needs_location)
 
 
 @router.get("/chat/history", response_model=list[HistoryMessage])
