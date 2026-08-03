@@ -42,20 +42,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app --no-create-home app
+
 WORKDIR /app
 
-COPY --from=builder /app/.venv /app/.venv
-COPY . /app
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --chown=app:app . /app
 
-# Chromium + its OS libraries must be installed here (not in the builder)
-# because this installs real system packages, not files copyable between
-# stages. Only chromium is fetched (not firefox/webkit) to keep this lean.
-RUN /app/.venv/bin/python -m playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+# Chromium's OS libraries must be installed here (not in the builder) because
+# this installs real system packages, not files copyable between stages. Only
+# the headless-shell build is fetched (not full Chromium/firefox/webkit) since
+# the app only ever launches headless(); chown happens in this same layer so
+# it doesn't force a copy-up of these files into a separate layer later.
+RUN /app/.venv/bin/python -m playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chown -R app:app /ms-playwright
 
-RUN groupadd --system app \
-    && useradd --system --gid app --home-dir /app --no-create-home app \
-    && chown -R app:app /app /ms-playwright
 USER app
 
 EXPOSE 8000
