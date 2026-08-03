@@ -70,6 +70,29 @@ def get_retailers():
 
     return retailers
 
+
+def load_existing_flyer_urls():
+    """
+    Reads the existing flyers.json (if any) from a previous run and returns
+    the set of flyer URLs already recorded there, so this run can skip
+    re-adding flyers that were already fetched.
+    """
+    if not os.path.exists(OUTPUT_JSON):
+        return set()
+
+    with open(OUTPUT_JSON, "r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            return set()
+
+    urls = set()
+    for retailer in data.get("retailers", []):
+        for flyer in retailer.get("flyers", []):
+            if flyer.get("url"):
+                urls.add(flyer["url"])
+    return urls
+
 def extract_stores(html):
     """
     Extracts the `myData` JS array (store/location list) embedded in the page's
@@ -211,8 +234,10 @@ def main():
     start_time = time.perf_counter()
 
     retailers = get_retailers()
+    existing_flyer_urls = load_existing_flyer_urls()
 
     print(f"Processing {len(retailers)} retailer(s)...")
+    print(f"{len(existing_flyer_urls)} flyer(s) already known from a previous run.")
 
     output = {
         "retailers": []
@@ -233,23 +258,22 @@ def main():
         strict_flyers = extract_flyers_strict(html)
         stores = extract_stores(html)
 
-        if strict_flyers:
-            flyers = strict_flyers
-            method = "strict"
-        else:
-            flyers = []
-            method = "none"
+        method = "strict" if strict_flyers else "none"
+
+        new_flyers = [f for f in strict_flyers if f["url"] not in existing_flyer_urls]
+        skipped = len(strict_flyers) - len(new_flyers)
 
         output["retailers"].append({
             "name": name,
             "retailer_url": url,
             "extraction_method": method,
-            "flyers": flyers,
+            "flyers": new_flyers,
             "stores": stores
 
         })
 
-        print(f"Found {len(flyers)} flyer(s).")
+        print(f"Found {len(strict_flyers)} flyer(s) on page, {len(new_flyers)} new "
+              f"({skipped} already in flyers.json, skipped).")
 
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
