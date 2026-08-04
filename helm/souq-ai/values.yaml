@@ -8,12 +8,12 @@ service:
   type: ClusterIP
   port: 80
 
-hostName: "souq-ai-staging.foaps.co"
+hostName: "souq-ai-staging.orderpipe.co"
 
 commonEnv:
   ENV: "prod"
   CLAUDE_MODEL: "anthropic.claude-opus-4-8"
-  AWS_REGION: ""
+  AWS_REGION: "ap-south-1"
   NUMBER_OF_RETAILERS: ""
   NUMBER_OF_FLYERS: ""
   NUMBER_OF_IMAGES: ""
