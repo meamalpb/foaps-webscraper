@@ -1,0 +1,49 @@
+replicaCount: 1
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  tag: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+hostName: "souq-ai-staging.foaps.co"
+
+commonEnv:
+  ENV: "prod"
+  CLAUDE_MODEL: "anthropic.claude-opus-4-8"
+  AWS_REGION: ""
+  NUMBER_OF_RETAILERS: ""
+  NUMBER_OF_FLYERS: ""
+  NUMBER_OF_IMAGES: ""
+
+# Keys pulled from the `{{ fullname }}-secrets` Secret at deploy time (added in the next step).
+secretEnv:
+  - DATABASE_URL
+  - AWS_BEARER_TOKEN_BEDROCK
+
+livenessProbe:
+  httpGet:
+    path: /docs
+    port: http
+  initialDelaySeconds: 20
+  periodSeconds: 15
+  failureThreshold: 3
+  timeoutSeconds: 5
+readinessProbe:
+  httpGet:
+    path: /docs
+    port: http
+  initialDelaySeconds: 20
+  periodSeconds: 15
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
