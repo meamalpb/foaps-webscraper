@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "souq-ai.fullname" . }}-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "souq-ai.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "souq-ai.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,23 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "souq-ai.fullname" . }}-http-route
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+    - name: envoy-gateway
+      sectionName: https
+      namespace: envoy
+  hostnames:
+    - {{ .Values.hostName }}
+  rules:
+    - backendRefs:
+        - kind: Service
+          name: {{ include "souq-ai.fullname" . }}-service
+          port: {{ .Values.service.port }}
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: "100s"
