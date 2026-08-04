@@ -4,10 +4,9 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite:///./souq_ai_chat.db"
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+DATABASE_URL = os.environ.get("DATABASE_URL") or "postgresql+psycopg://souq_ai:souq_ai@localhost:5432/souq_ai"
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
