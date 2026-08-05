@@ -9,7 +9,7 @@ import time
 load_dotenv()
 
 
-ENV = os.getenv("ENV", "prod").lower()
+RUNMODE = os.getenv("RUNMODE", "prod").lower()
 NUMBER_OF_RETAILERS = int(os.getenv("NUMBER_OF_RETAILERS", "999999"))
 NUMBER_OF_FLYERS = int(os.getenv("NUMBER_OF_FLYERS", "999999"))
 NUMBER_OF_IMAGES = int(os.getenv("NUMBER_OF_IMAGES", "999999"))
@@ -29,7 +29,7 @@ def get_retailers():
 
     retailers = data["retailers"]
 
-    if ENV == "dev":
+    if RUNMODE == "dev":
         retailers = retailers[:NUMBER_OF_RETAILERS]
 
     return retailers
@@ -100,7 +100,7 @@ def extract_images(html):
             "alt": img.get("alt", "").strip()
         })
 
-        if ENV == "dev" and len(images) >= NUMBER_OF_IMAGES:
+        if RUNMODE == "dev" and len(images) >= NUMBER_OF_IMAGES:
             break
 
     return images
@@ -130,7 +130,7 @@ def main():
         }
 
         flyers = retailer["flyers"]
-        if ENV == "dev":
+        if RUNMODE == "dev":
             flyers = flyers[:NUMBER_OF_FLYERS]
 
         for flyer in flyers:

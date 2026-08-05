@@ -43,7 +43,7 @@ def get_retailers():
     """
     Reads supermarkets.json.
 
-    If ENV=dev:
+    If RUNMODE=dev:
         returns the first NUMBER_OF_RETAILERS retailers.
 
     Otherwise:
@@ -62,9 +62,9 @@ def get_retailers():
 
     retailers = list(data.items())
 
-    env = os.getenv("ENV", "prod").lower()
+    runmode = os.getenv("RUNMODE", "prod").lower()
 
-    if env == "dev":
+    if runmode == "dev":
         limit = int(os.getenv("NUMBER_OF_RETAILERS", "1"))
         retailers = retailers[:limit]
 

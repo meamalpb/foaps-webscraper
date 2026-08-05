@@ -13,15 +13,16 @@ hostName: "souq-ai-staging.orderpipe.co"
 commonEnv:
   ENV: "prod"
   CLAUDE_MODEL: "anthropic.claude-opus-4-8"
-  AWS_REGION: "ap-south-1"
-  NUMBER_OF_RETAILERS: ""
-  NUMBER_OF_FLYERS: ""
-  NUMBER_OF_IMAGES: ""
 
 # Keys pulled from the `{{ fullname }}-secrets` Secret at deploy time (added in the next step).
 secretEnv:
   - DATABASE_URL
   - AWS_BEARER_TOKEN_BEDROCK
+  - AWS_REGION
+  - RUNMODE
+  - NUMBER_OF_RETAILERS
+  - NUMBER_OF_IMAGES
+  - NUMBER_OF_FLYERS
 
 livenessProbe:
   httpGet:
