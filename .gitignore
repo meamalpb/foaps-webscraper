@@ -3,6 +3,7 @@ results/
 .DS_Store
 .env
 *.db
+scripts/
 
 # Python-generated files
 __pycache__/
