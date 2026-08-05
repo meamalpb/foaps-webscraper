@@ -47,3 +47,10 @@ resources:
   limits:
     memory: "1Gi"
     cpu: "500m"
+
+# Persists /app/results (scraped flyers/images/products) across restarts and
+# deploys. storageClassName "" uses the cluster's default StorageClass
+# (eks-ebs-csi-sc, EBS gp3).
+persistence:
+  size: 1Gi
+  storageClassName: ""

@@ -15,6 +15,8 @@ spec:
       labels:
         {{- include "souq-ai.labels" . | nindent 8 }}
     spec:
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: {{ include "souq-ai.fullname" . }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -23,6 +25,9 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
+          volumeMounts:
+            - name: results
+              mountPath: /app/results
           env:
             {{- range $key, $value := .Values.commonEnv }}
             - name: {{ $key }}
@@ -42,8 +47,14 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       restartPolicy: Always
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: {{ include "souq-ai.fullname" . }}-results-pvc
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    # EBS volumes are ReadWriteOnce, so with a single replica the old and new
+    # pods can't both hold the results PVC at once; RollingUpdate would get
+    # stuck waiting to attach it to the surge pod. Recreate tears the old pod
+    # down first, trading a few seconds of downtime per deploy for a rollout
+    # that doesn't hang.
+    type: Recreate
