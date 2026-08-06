@@ -26,6 +26,7 @@ REQUEST_TIMEOUT_SECONDS = 60
 CLASSIFY_MAX_TOKENS = 1024
 REPLY_MAX_TOKENS = 1024
 MAX_MATCHES = 10
+MAX_STORE_DISTANCE_KM = 50  # stores farther than this aren't considered "near me"
 FUZZY_SCORE_CUTOFF = 70
 MAX_HISTORY_EXCHANGES = 5  # how many past user+reply pairs feed back in as conversation context
 
@@ -328,14 +329,16 @@ def nearest_store(city, merchant_name, latitude, longitude):
 
 
 def nearby_stores(latitude, longitude, limit=MAX_MATCHES):
-    """All stores across all retailers/cities, nearest first - used for a
-    plain 'what's the nearest store to me' query with no product mentioned."""
+    """Stores within MAX_STORE_DISTANCE_KM across all retailers/cities,
+    nearest first - used for a plain 'what's the nearest store to me' query
+    with no product mentioned. Anything farther isn't "near me"."""
     _, stores_index = _load_data()
     entries = []
     for (city, merchant_name), stores in stores_index.items():
         for store in stores:
             distance = haversine_km(latitude, longitude, store["latitude"], store["longitude"])
-            entries.append((distance, city, merchant_name, store))
+            if distance <= MAX_STORE_DISTANCE_KM:
+                entries.append((distance, city, merchant_name, store))
     entries.sort(key=lambda e: e[0])
     return entries[:limit]
 
@@ -480,27 +483,31 @@ def filter_by_cities(products, cities):
 def rank_and_cap(products, latitude, longitude, near_me):
     """Sorts by nearest-store distance when a near-me location is available
     and relevant, otherwise by price (the existing default). Either way,
-    caps to MAX_MATCHES and returns the total match count before capping."""
-    total = len(products)
+    caps to MAX_MATCHES and returns the total match count before capping.
+
+    For near-me, anything farther than MAX_STORE_DISTANCE_KM (or with no
+    known store location) is dropped entirely - a store isn't "near me" just
+    because it happens to sell a matching product. Also returns too_far:
+    True when there were real product matches but none had a nearby store,
+    so the caller can give a distance-specific reply instead of a generic
+    "no matches" one."""
     if near_me and latitude is not None and longitude is not None:
         enriched = []
         for p in products:
             info = nearest_store(p["city"], p["merchant_name"], latitude, longitude)
-            enriched.append({
-                **p,
-                "_nearest_store": info[0] if info else None,
-                "_distance_km": info[1] if info else None,
-            })
-        ordered = sorted(
-            enriched,
-            key=lambda p: p["_distance_km"] if p["_distance_km"] is not None else float("inf"),
-        )
-    else:
-        ordered = sorted(
-            products,
-            key=lambda p: p["discounted_price"] if p["discounted_price"] is not None else float("inf"),
-        )
-    return ordered[:MAX_MATCHES], total
+            if info is None or info[1] > MAX_STORE_DISTANCE_KM:
+                continue
+            enriched.append({**p, "_nearest_store": info[0], "_distance_km": info[1]})
+        enriched.sort(key=lambda p: p["_distance_km"])
+        too_far = bool(products) and not enriched
+        return enriched[:MAX_MATCHES], len(enriched), too_far
+
+    total = len(products)
+    ordered = sorted(
+        products,
+        key=lambda p: p["discounted_price"] if p["discounted_price"] is not None else float("inf"),
+    )
+    return ordered[:MAX_MATCHES], total, False
 
 
 def format_products_for_prompt(products, total):
@@ -523,7 +530,7 @@ def format_products_for_prompt(products, total):
 
 def format_nearby_stores(entries):
     if not entries:
-        return "No store locations were found."
+        return f"No stores were found within {MAX_STORE_DISTANCE_KM} km of your location."
     return "\n".join(
         f"- {merchant_name} ({store['name']}, {city}): {distance:.1f} km away"
         for distance, city, merchant_name, store in entries
@@ -537,8 +544,14 @@ def format_transcript(messages):
     return "\n".join(f"{speaker.get(m['role'], m['role'])}: {m['content']}" for m in messages)
 
 
-def format_item_section(query, matched, total, city_fallback, city_label):
-    lines = format_products_for_prompt(matched, total)
+def format_item_section(query, matched, total, city_fallback, city_label, too_far=False):
+    if too_far:
+        lines = (
+            f"{query} is available, but not at any store within "
+            f"{MAX_STORE_DISTANCE_KM} km of your location."
+        )
+    else:
+        lines = format_products_for_prompt(matched, total)
     note = f" (no results matched {city_label}; showing all cities)" if city_fallback else ""
     return f"## {query}{note}\n{lines}"
 
@@ -619,7 +632,7 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
             f"with their distance. {PLAIN_TEXT_INSTRUCTION}"
         )
         reply = generate_grounded_reply(prompt)
-        return reply or "I couldn't find any nearby stores right now. Please try again later."
+        return reply or f"I couldn't find any stores within {MAX_STORE_DISTANCE_KM} km of your location right now."
 
     items = raw_items or [{"query": message, "category": None, "subcategory": None}]
     products = load_products()
@@ -629,9 +642,11 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
         query = item.get("query") or message
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, [city] if city else [])
-        matched, total = rank_and_cap(matched, latitude, longitude, near_me)
+        matched, total, too_far = rank_and_cap(matched, latitude, longitude, near_me)
         any_matched = any_matched or bool(matched)
-        sections.append(format_item_section(query, matched, total, city_fallback, f'the city "{city}"'))
+        sections.append(
+            format_item_section(query, matched, total, city_fallback, f'the city "{city}"', too_far)
+        )
 
     context = "\n\n".join(sections)
     prompt = (
@@ -666,9 +681,11 @@ def handle_price_compare(message, extracted, transcript, latitude=None, longitud
         query = item.get("query") or message
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, cities)
-        matched, total = rank_and_cap(matched, latitude, longitude, near_me)
+        matched, total, too_far = rank_and_cap(matched, latitude, longitude, near_me)
         any_matched = any_matched or bool(matched)
-        sections.append(format_item_section(query, matched, total, city_fallback, "the requested cities"))
+        sections.append(
+            format_item_section(query, matched, total, city_fallback, "the requested cities", too_far)
+        )
 
     context = "\n\n".join(sections)
     prompt = (
