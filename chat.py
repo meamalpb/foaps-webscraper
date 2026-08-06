@@ -25,7 +25,8 @@ MAX_RETRIES = 3
 REQUEST_TIMEOUT_SECONDS = 60
 CLASSIFY_MAX_TOKENS = 1024
 REPLY_MAX_TOKENS = 1024
-MAX_MATCHES = 10
+MAX_MATCHES = 10  # default display cap; past this, ask before listing
+EXPANDED_MATCHES = 30  # cap used once the user explicitly asks to see all results
 MAX_STORE_DISTANCE_KM = 50  # stores farther than this aren't considered "near me"
 FUZZY_SCORE_CUTOFF = 70
 MAX_HISTORY_EXCHANGES = 5  # how many past user+reply pairs feed back in as conversation context
@@ -79,8 +80,17 @@ SEARCH_ITEM_SCHEMA = {
                 "otherwise."
             ),
         },
+        "show_all": {
+            "type": "boolean",
+            "description": (
+                "True if the user is explicitly asking to see the full list "
+                "of results for this item, e.g. replying 'yes show me all' "
+                "or 'show all results' to a previous offer in the recent "
+                "conversation. False otherwise (the default)."
+            ),
+        },
     },
-    "required": ["query", "category", "subcategory"],
+    "required": ["query", "category", "subcategory", "show_all"],
 }
 
 PRODUCT_SEARCH_TOOL = {
@@ -229,6 +239,12 @@ CLASSIFY_PROMPT = (
     "near their current location (e.g. 'best deals near me', 'closest "
     "place to buy milk', 'what's the nearest Hyper Panda') - this is valid "
     "even with an empty items list, if no specific product was mentioned.\n\n"
+    "For classify_product_search and classify_price_compare, also set an "
+    "item's show_all to true if the user's message is confirming they want "
+    "to see the full list of results for it (e.g. 'yes show me all', 'show "
+    "all results') in response to a previous offer visible in the recent "
+    "conversation - match the item to whichever search that offer was "
+    "about.\n\n"
     "Recent conversation (may be empty, most recent last):\n{transcript}\n\n"
     "User message: {message}"
 )
@@ -480,17 +496,21 @@ def filter_by_cities(products, cities):
     return products, True
 
 
-def rank_and_cap(products, latitude, longitude, near_me):
+def rank_and_cap(products, latitude, longitude, near_me, show_all=False):
     """Sorts by nearest-store distance when a near-me location is available
-    and relevant, otherwise by price (the existing default). Either way,
-    caps to MAX_MATCHES and returns the total match count before capping.
+    and relevant, otherwise by price (the existing default). Returns
+    (capped, total, too_far): capped is sliced to MAX_MATCHES (or
+    EXPANDED_MATCHES once the user has explicitly asked to see all), and
+    total is the full match count before capping.
 
     For near-me, anything farther than MAX_STORE_DISTANCE_KM (or with no
     known store location) is dropped entirely - a store isn't "near me" just
-    because it happens to sell a matching product. Also returns too_far:
-    True when there were real product matches but none had a nearby store,
-    so the caller can give a distance-specific reply instead of a generic
+    because it happens to sell a matching product. too_far is True when
+    there were real product matches but none had a nearby store, so the
+    caller can give a distance-specific reply instead of a generic
     "no matches" one."""
+    cap = EXPANDED_MATCHES if show_all else MAX_MATCHES
+
     if near_me and latitude is not None and longitude is not None:
         enriched = []
         for p in products:
@@ -500,14 +520,13 @@ def rank_and_cap(products, latitude, longitude, near_me):
             enriched.append({**p, "_nearest_store": info[0], "_distance_km": info[1]})
         enriched.sort(key=lambda p: p["_distance_km"])
         too_far = bool(products) and not enriched
-        return enriched[:MAX_MATCHES], len(enriched), too_far
+        return enriched[:cap], len(enriched), too_far
 
-    total = len(products)
     ordered = sorted(
         products,
         key=lambda p: p["discounted_price"] if p["discounted_price"] is not None else float("inf"),
     )
-    return ordered[:MAX_MATCHES], total, False
+    return ordered[:cap], len(ordered), False
 
 
 def format_products_for_prompt(products, total):
@@ -526,6 +545,17 @@ def format_products_for_prompt(products, total):
     if total > len(products):
         lines.append(f"(showing {len(products)} of {total} matches)")
     return "\n".join(lines)
+
+
+def format_overflow_section(query, total):
+    """A fixed-size summary (just the count) for a result set larger than
+    MAX_MATCHES - keeps prompt cost flat regardless of catalog size. No
+    products are listed here; the reply should ask the user to choose
+    between seeing all of them or narrowing down first."""
+    return (
+        f"## {query}\n{total} matching products found, more than the "
+        f"{MAX_MATCHES} shown by default. Do not list any of them yet."
+    )
 
 
 def format_nearby_stores(entries):
@@ -640,13 +670,21 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
     any_matched = False
     for item in items:
         query = item.get("query") or message
+        show_all = item.get("show_all", False)
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, [city] if city else [])
-        matched, total, too_far = rank_and_cap(matched, latitude, longitude, near_me)
-        any_matched = any_matched or bool(matched)
-        sections.append(
-            format_item_section(query, matched, total, city_fallback, f'the city "{city}"', too_far)
-        )
+        capped, total, too_far = rank_and_cap(matched, latitude, longitude, near_me, show_all)
+        any_matched = any_matched or bool(capped)
+        if too_far:
+            sections.append(
+                format_item_section(query, capped, total, city_fallback, f'the city "{city}"', too_far)
+            )
+        elif total > MAX_MATCHES and not show_all:
+            sections.append(format_overflow_section(query, total))
+        else:
+            sections.append(
+                format_item_section(query, capped, total, city_fallback, f'the city "{city}"')
+            )
 
     context = "\n\n".join(sections)
     prompt = (
@@ -658,8 +696,12 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
         "per item requested (use the item name as a lead-in, e.g. 'Rice: ...'), "
         "listing standout options with price/store/city as plain hyphen bullet "
         "points. If an item had no matches, say so briefly under that item "
-        "rather than skipping it silently. Do not invent products. "
-        f"{PLAIN_TEXT_INSTRUCTION}"
+        "rather than skipping it silently. Do not invent products. For any "
+        "section that gives a total count and says not to list them yet, do "
+        "not list any products for it - instead tell the user how many were "
+        "found and ask whether they'd like to see all of them, or would "
+        "rather answer a couple of quick questions (e.g. brand, budget, or "
+        f"a specific feature) to narrow it down first. {PLAIN_TEXT_INSTRUCTION}"
     )
     reply = generate_grounded_reply(prompt)
     if reply is not None:
@@ -679,13 +721,21 @@ def handle_price_compare(message, extracted, transcript, latitude=None, longitud
     any_matched = False
     for item in items:
         query = item.get("query") or message
+        show_all = item.get("show_all", False)
         matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, cities)
-        matched, total, too_far = rank_and_cap(matched, latitude, longitude, near_me)
-        any_matched = any_matched or bool(matched)
-        sections.append(
-            format_item_section(query, matched, total, city_fallback, "the requested cities", too_far)
-        )
+        capped, total, too_far = rank_and_cap(matched, latitude, longitude, near_me, show_all)
+        any_matched = any_matched or bool(capped)
+        if too_far:
+            sections.append(
+                format_item_section(query, capped, total, city_fallback, "the requested cities", too_far)
+            )
+        elif total > MAX_MATCHES and not show_all:
+            sections.append(format_overflow_section(query, total))
+        else:
+            sections.append(
+                format_item_section(query, capped, total, city_fallback, "the requested cities")
+            )
 
     context = "\n\n".join(sections)
     prompt = (
@@ -696,7 +746,12 @@ def handle_price_compare(message, extracted, transcript, latitude=None, longitud
         "For each product group, identify the cheapest option, note any "
         "notable price gaps, and mention store/city, as a short section per "
         "product (use the product name as a lead-in). If a product had no "
-        f"matches, say so clearly and do not invent prices. {PLAIN_TEXT_INSTRUCTION}"
+        "matches, say so clearly and do not invent prices. For any section "
+        "that gives a total count and says not to list them yet, do not "
+        "list any products for it - instead tell the user how many were "
+        "found and ask whether they'd like to see all of them, or would "
+        "rather answer a couple of quick questions (e.g. brand, budget, or "
+        f"a specific feature) to narrow it down first. {PLAIN_TEXT_INSTRUCTION}"
     )
     reply = generate_grounded_reply(prompt)
     if reply is not None:
