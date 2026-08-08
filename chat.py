@@ -80,17 +80,8 @@ SEARCH_ITEM_SCHEMA = {
                 "otherwise."
             ),
         },
-        "show_all": {
-            "type": "boolean",
-            "description": (
-                "True if the user is explicitly asking to see the full list "
-                "of results for this item, e.g. replying 'yes show me all' "
-                "or 'show all results' to a previous offer in the recent "
-                "conversation. False otherwise (the default)."
-            ),
-        },
     },
-    "required": ["query", "category", "subcategory", "show_all"],
+    "required": ["query", "category", "subcategory"],
 }
 
 PRODUCT_SEARCH_TOOL = {
@@ -98,9 +89,12 @@ PRODUCT_SEARCH_TOOL = {
     "description": (
         "The user is looking for one or more specific products or product "
         "categories (e.g. 'do you have any deals on rice', 'looking for a "
-        "TV', or a list like 'rice, milk, and a phone charger'). Extract one "
-        "'items' entry per distinct product/need mentioned, and a city to "
-        "filter by if mentioned."
+        "TV', or a list like 'rice, milk, and a phone charger'), or is "
+        "browsing everything available at a specific store (e.g. 'what "
+        "deals are at Hyper Panda'). Extract one 'items' entry per distinct "
+        "product/need mentioned (empty if the user just wants to browse a "
+        "store with no specific product), a city to filter by if mentioned, "
+        "and a store to filter by if mentioned."
     ),
     "input_schema": {
         "type": "object",
@@ -114,6 +108,15 @@ PRODUCT_SEARCH_TOOL = {
                 "type": ["string", "null"],
                 "description": "City the user wants results for, if mentioned; null otherwise.",
             },
+            "store": {
+                "type": ["string", "null"],
+                "description": (
+                    "Store/retailer name the user wants results from, if "
+                    "mentioned (e.g. 'Hyper Panda'); null otherwise. Resolve "
+                    "from the message itself or, for a follow-up, from the "
+                    "recent conversation."
+                ),
+            },
             "near_me": {
                 "type": "boolean",
                 "description": (
@@ -123,8 +126,17 @@ PRODUCT_SEARCH_TOOL = {
                     "Panda'); false otherwise."
                 ),
             },
+            "show_all": {
+                "type": "boolean",
+                "description": (
+                    "True if the user is explicitly asking to see the full "
+                    "list of results, e.g. replying 'yes show me all' or "
+                    "'show all results' to a previous offer in the recent "
+                    "conversation. False otherwise (the default)."
+                ),
+            },
         },
-        "required": ["items", "city", "near_me"],
+        "required": ["items", "city", "store", "near_me", "show_all"],
     },
 }
 
@@ -150,6 +162,13 @@ PRICE_COMPARE_TOOL = {
                 "items": {"type": "string"},
                 "description": "Cities to restrict the comparison to, if mentioned; empty means no restriction.",
             },
+            "store": {
+                "type": ["string", "null"],
+                "description": (
+                    "Store/retailer name to restrict the comparison to, if "
+                    "mentioned (e.g. 'Hyper Panda'); null otherwise."
+                ),
+            },
             "near_me": {
                 "type": "boolean",
                 "description": (
@@ -158,8 +177,17 @@ PRICE_COMPARE_TOOL = {
                     "otherwise."
                 ),
             },
+            "show_all": {
+                "type": "boolean",
+                "description": (
+                    "True if the user is explicitly asking to see the full "
+                    "list of results, e.g. replying 'yes show me all' or "
+                    "'show all results' to a previous offer in the recent "
+                    "conversation. False otherwise (the default)."
+                ),
+            },
         },
-        "required": ["items", "cities", "near_me"],
+        "required": ["items", "cities", "store", "near_me", "show_all"],
     },
 }
 
@@ -239,12 +267,16 @@ CLASSIFY_PROMPT = (
     "near their current location (e.g. 'best deals near me', 'closest "
     "place to buy milk', 'what's the nearest Hyper Panda') - this is valid "
     "even with an empty items list, if no specific product was mentioned.\n\n"
-    "For classify_product_search and classify_price_compare, also set an "
-    "item's show_all to true if the user's message is confirming they want "
-    "to see the full list of results for it (e.g. 'yes show me all', 'show "
-    "all results') in response to a previous offer visible in the recent "
-    "conversation - match the item to whichever search that offer was "
-    "about.\n\n"
+    "For classify_product_search and classify_price_compare, also resolve "
+    "store to a specific retailer name if the user is asking about deals "
+    "at, or wants results restricted to, a specific store (e.g. 'what "
+    "deals are at Hyper Panda', 'rice at Hyper Panda') - this is valid "
+    "even with an empty items list, if the user just wants to browse "
+    "everything at that store.\n\n"
+    "For classify_product_search and classify_price_compare, also set "
+    "show_all to true if the user's message is confirming they want to see "
+    "the full list of results (e.g. 'yes show me all', 'show all results') "
+    "in response to a previous offer visible in the recent conversation.\n\n"
     "Recent conversation (may be empty, most recent last):\n{transcript}\n\n"
     "User message: {message}"
 )
@@ -496,6 +528,30 @@ def filter_by_cities(products, cities):
     return products, True
 
 
+def filter_by_store(products, store_name):
+    """Filters to products sold by the named merchant; falls back to the
+    unfiltered list (with a flag) if nothing matches directly or via fuzzy
+    match, same graceful-degradation contract as filter_by_cities."""
+    if not store_name or not products:
+        return products, False
+
+    name_lower = store_name.lower()
+    filtered = [p for p in products if name_lower in p["merchant_name"].lower()]
+    if filtered:
+        return filtered, False
+
+    merchants = sorted({p["merchant_name"] for p in products})
+    results = process.extract(
+        name_lower, [m.lower() for m in merchants], scorer=fuzz.partial_ratio,
+        score_cutoff=FUZZY_SCORE_CUTOFF, limit=1,
+    )
+    if results:
+        matched_merchant = merchants[results[0][2]]
+        return [p for p in products if p["merchant_name"] == matched_merchant], False
+
+    return products, True
+
+
 def rank_and_cap(products, latitude, longitude, near_me, show_all=False):
     """Sorts by nearest-store distance when a near-me location is available
     and relevant, otherwise by price (the existing default). Returns
@@ -574,7 +630,7 @@ def format_transcript(messages):
     return "\n".join(f"{speaker.get(m['role'], m['role'])}: {m['content']}" for m in messages)
 
 
-def format_item_section(query, matched, total, city_fallback, city_label, too_far=False):
+def format_item_section(query, matched, total, fallback_note, too_far=False):
     if too_far:
         lines = (
             f"{query} is available, but not at any store within "
@@ -582,7 +638,7 @@ def format_item_section(query, matched, total, city_fallback, city_label, too_fa
         )
     else:
         lines = format_products_for_prompt(matched, total)
-    note = f" (no results matched {city_label}; showing all cities)" if city_fallback else ""
+    note = f" ({fallback_note})" if fallback_note else ""
     return f"## {query}{note}\n{lines}"
 
 
@@ -645,12 +701,25 @@ def handle_onboarding(message, extracted, transcript, latitude=None, longitude=N
     return generate_grounded_reply(prompt) or SOUQ_AI_DESCRIPTION
 
 
+def build_fallback_note(city_fallback, city, store_fallback, store):
+    notes = []
+    if city_fallback:
+        notes.append(f'no results matched the city "{city}"')
+    if store_fallback:
+        notes.append(f'no results matched the store "{store}"')
+    if not notes:
+        return None
+    return ", ".join(notes) + "; showing all instead"
+
+
 def handle_product_search(message, extracted, transcript, latitude=None, longitude=None):
     raw_items = extracted.get("items") or []
     near_me = extracted.get("near_me", False)
     city = extracted.get("city")
+    store = extracted.get("store")
+    show_all = extracted.get("show_all", False)
 
-    if near_me and not raw_items and latitude is not None and longitude is not None:
+    if near_me and not raw_items and not store and latitude is not None and longitude is not None:
         entries = nearby_stores(latitude, longitude)
         context = format_nearby_stores(entries)
         prompt = (
@@ -664,27 +733,32 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
         reply = generate_grounded_reply(prompt)
         return reply or f"I couldn't find any stores within {MAX_STORE_DISTANCE_KM} km of your location right now."
 
-    items = raw_items or [{"query": message, "category": None, "subcategory": None}]
     products = load_products()
+    products, store_fallback = filter_by_store(products, store)
+
+    # Browsing everything at a store (no specific product) skips keyword
+    # matching entirely - the store filter above already is the match.
+    browsing_store = bool(store) and not raw_items
+    items = raw_items or [{"query": f"deals at {store}" if store else message, "category": None, "subcategory": None}]
+
     sections = []
     any_matched = False
     for item in items:
         query = item.get("query") or message
-        show_all = item.get("show_all", False)
-        matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
+        if browsing_store:
+            matched = products
+        else:
+            matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, [city] if city else [])
         capped, total, too_far = rank_and_cap(matched, latitude, longitude, near_me, show_all)
         any_matched = any_matched or bool(capped)
+        fallback_note = build_fallback_note(city_fallback, city, store_fallback, store)
         if too_far:
-            sections.append(
-                format_item_section(query, capped, total, city_fallback, f'the city "{city}"', too_far)
-            )
+            sections.append(format_item_section(query, capped, total, fallback_note, too_far))
         elif total > MAX_MATCHES and not show_all:
             sections.append(format_overflow_section(query, total))
         else:
-            sections.append(
-                format_item_section(query, capped, total, city_fallback, f'the city "{city}"')
-            )
+            sections.append(format_item_section(query, capped, total, fallback_note))
 
     context = "\n\n".join(sections)
     prompt = (
@@ -712,30 +786,36 @@ def handle_product_search(message, extracted, transcript, latitude=None, longitu
 
 
 def handle_price_compare(message, extracted, transcript, latitude=None, longitude=None):
-    items = extracted.get("items") or [{"query": message, "category": None, "subcategory": None}]
+    raw_items = extracted.get("items") or []
     cities = extracted.get("cities") or []
+    store = extracted.get("store")
     near_me = extracted.get("near_me", False)
+    show_all = extracted.get("show_all", False)
 
     products = load_products()
+    products, store_fallback = filter_by_store(products, store)
+
+    browsing_store = bool(store) and not raw_items
+    items = raw_items or [{"query": f"deals at {store}" if store else message, "category": None, "subcategory": None}]
+
     sections = []
     any_matched = False
     for item in items:
         query = item.get("query") or message
-        show_all = item.get("show_all", False)
-        matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
+        if browsing_store:
+            matched = products
+        else:
+            matched = search_products(products, [query], item.get("category"), item.get("subcategory"))
         matched, city_fallback = filter_by_cities(matched, cities)
         capped, total, too_far = rank_and_cap(matched, latitude, longitude, near_me, show_all)
         any_matched = any_matched or bool(capped)
+        fallback_note = build_fallback_note(city_fallback, ", ".join(cities), store_fallback, store)
         if too_far:
-            sections.append(
-                format_item_section(query, capped, total, city_fallback, "the requested cities", too_far)
-            )
+            sections.append(format_item_section(query, capped, total, fallback_note, too_far))
         elif total > MAX_MATCHES and not show_all:
             sections.append(format_overflow_section(query, total))
         else:
-            sections.append(
-                format_item_section(query, capped, total, city_fallback, "the requested cities")
-            )
+            sections.append(format_item_section(query, capped, total, fallback_note))
 
     context = "\n\n".join(sections)
     prompt = (
